@@ -29,6 +29,10 @@ const Env = z.object({
   TELEGRAM_CHAT_ID: z.string().optional(),
   NOTION_TOKEN: z.string().optional(),
 
+  // --- Faz 2 (çok-kanal gönderim) — hazır ama RED tier: kod aktive edilene kadar okunmaz ---
+  SENDING_DOMAIN: z.string().optional(),
+  RESEND_API_KEY: z.string().optional(),
+
   // --- Competitor-intel ---
   FETCH_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
   GAP_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.6),

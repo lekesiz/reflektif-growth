@@ -44,7 +44,7 @@ launchd kontrol: `launchctl list | grep reflektif` · durdur: `launchctl unload 
 
 ## SIRADA: Faz 2 (çok-kanal gönderim) — dış-TODO bekliyor
 Bunlar **dışarıdan (founder) sağlanacak** girdilerdir; gelmeden Faz 2 kodu aktive edilmez:
-- [ ] `reflektif.info` DNS: SPF + DKIM + DMARC + warmup (domain kayıtlı, IONOS + Resend'de)
+- [x] `reflektif.info` DNS: SPF + DKIM + DMARC → ✅ Resend API ile doğrulandı (2026-07-02): domain `verified`, `eu-west-1`, TXT `resend._domainkey` + MX `send` + TXT `send` hepsi `verified`. `RESEND_API_KEY` + `SENDING_DOMAIN` lokal `.env`'e eklendi (gitignore'lu, commit'lenmedi), `env.ts`'e opsiyonel alan olarak tanımlandı — **henüz hiçbir kod okumuyor/göndermiyor** (RED tier, guardrail'li Faz 2 kodu yazılana kadar). Warmup planı hâlâ açık iş.
 - [ ] Telegram bot token + chat_id (digest/alarm)
 - [ ] Notion token + DB (CRM)
 - [ ] Email-verify API key (MillionVerifier / ZeroBounce) — `leadgen:verify` şu an graceful `unknown` dönüyor
