@@ -86,11 +86,13 @@ export async function fail(id: number, err: string): Promise<void> {
   );
 }
 
-// Crash kurtarma: lease süresi geçmiş 'claimed' işleri 'pending'e geri al.
+// Crash kurtarma: lease süresi geçmiş 'claimed'/'running' işleri 'pending'e geri al.
+// 'running' de kapsanmalı: worker markRunning() sonrası handler çalışırken process SIGTERM alırsa
+// (ör. tick script'i dıştan kesilirse) job süresiz 'running'de takılı kalır, yalnız 'claimed' yeterli değil.
 export async function reapExpired(): Promise<number> {
   const r = await query(
     `update agent_jobs set status='pending', locked_by=null, locked_until=null, updated_at=now()
-     where status='claimed' and locked_until < now()`,
+     where status in ('claimed','running') and locked_until < now()`,
   );
   return r.rowCount ?? 0;
 }
