@@ -51,6 +51,9 @@ async function fetchHtml(url: string): Promise<{ status: number; html: string; f
 }
 
 const GENERIC_LOCALS = ["info", "bilgi", "iletisim", "ik", "kariyer", "insankaynaklari", "destek", "contact", "hello", "admin", "kayit", "ogrenci"];
+// Teknik/otomatik kutular — hiçbir segmentte aday olmamalı (insan yok, KVKK açısından da anlamsız hedef).
+// local, karşılaştırmadan önce '.'/'-'/'_' ayraçlarından arındırılır (ör. "no-reply-tr", "webmaster.bounce" de yakalanır).
+const TECHNICAL_LOCALS = ["noreply", "donotreply", "postmaster", "webmaster", "abuse", "mailerdaemon", "bounce", "bounces", "unsubscribe", "optout"];
 function extractEmails(text: string, domain: string): Array<{ email: string; generic: boolean }> {
   const bare = domain.replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "");
   const re = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
@@ -61,6 +64,8 @@ function extractEmails(text: string, domain: string): Array<{ email: string; gen
     if (seen.has(email) || !email.includes(bare)) continue;
     seen.add(email);
     const local = email.split("@")[0] ?? "";
+    const localNorm = local.replace(/[.\-_]/g, "");
+    if (TECHNICAL_LOCALS.some((t) => localNorm === t || localNorm.startsWith(t))) continue;
     out.push({ email, generic: GENERIC_LOCALS.some((g) => local === g || local.startsWith(g)) });
   }
   return out;
@@ -263,10 +268,25 @@ const EnrichSchema = z.object({
   icp_score: z.coerce.number().default(0),
   why_now: z.string().default(""),
 });
-function normSegment(s: string): "b2b_edu" | "b2b2c_ld" | "b2c" {
-  const t = s.toLowerCase();
+const SEGMENTS = ["b2b_edu", "b2b2c_ld", "b2b_pro", "b2c"] as const;
+export function normSegment(s: string): "b2b_edu" | "b2b2c_ld" | "b2b_pro" | "b2c" {
+  // Model prompt'ta istenen literal enum değerini birebir döndürebilir — heuristiklerden önce buna güven.
+  const raw = s.trim() as (typeof SEGMENTS)[number];
+  if ((SEGMENTS as readonly string[]).includes(raw)) return raw;
+  // toLocaleLowerCase("tr"): düz .toLowerCase() Türkçe büyük "İ"yi "i̇" (nokta + birleşik işaret) yapar,
+  // bu da "İK" gibi kısaltmaların "ik" alt-dizesiyle eşleşmesini engeller.
+  const t = s.toLocaleLowerCase("tr");
+  // 2-3 harfli kısaltmalar (ik/hr/ld/l&d) tüm-kelime olarak eşleşmeli — aksi halde "psikolog", "teknik" gibi
+  // alakasız kelimelerin içinde alt-dize olarak yanlışlıkla yakalanırlar.
+  const words = t.split(/[^a-zçğıöşü0-9&]+/).filter(Boolean);
   if (t.includes("edu") || t.includes("okul") || t.includes("üniv") || t.includes("univ") || t.includes("school")) return "b2b_edu";
-  if (t.includes("ld") || t.includes("l&d") || t.includes("ik") || t.includes("hr") || t.includes("kurum")) return "b2b2c_ld";
+  // Kurumsal/tüzel-kişilik göstergesi ÖNCE kontrol edilir: 'bağımsız'/'koç'/'serbest' gibi bireysel-profesyonel
+  // anahtar kelimeleri kurumsal metinlerle çakışır (ör. "bağımsız İK danışmanlığı", "bağımsız denetim A.Ş.",
+  // "Koç Holding", "serbest bölge kurumsal ..."); bu çakışma varsa kurumsal sınıflandırma kazanmalı.
+  if (words.includes("ld") || words.includes("l&d") || words.includes("ik") || words.includes("hr") || t.includes("kurum") || t.includes("a.ş") || t.includes("denetim")) return "b2b2c_ld";
+  // Bağımsız/serbest bireysel profesyonel (kurum değil). NOT: 'danışman'/'danışmanlık' KASITLI olarak
+  // burada YOK — bunlar kurumsal danışmanlık firmalarıyla (b2b2c_ld) çakışır, yanlış segment sızıntısı yaratır.
+  if (t.includes("koç") || t.includes("coach") || t.includes("psikolog") || t.includes("terapist") || t.includes("bağımsız") || t.includes("bagimsiz") || t.includes("serbest")) return "b2b_pro";
   return "b2c";
 }
 function normEntity(s: string): "tacir" | "kamu" | "birey" | "bilinmiyor" {
@@ -296,15 +316,17 @@ export const leadgenEnrich: Handler = async (job) => {
     schema: EnrichSchema,
     system:
       "Sen Reflektif (kariyer-rehberlik/bilan SaaS) için lead nitelendiricisin. Verilen kurumun public site metninden sınıflandır. Uydurma; yalnız metne dayan.\n" +
-      "JSON: {segment, entity_type, icp_score, why_now}. segment ∈ {b2b_edu, b2b2c_ld, b2c}. entity_type ∈ {tacir, kamu, birey, bilinmiyor}. icp_score 0-100 SAYI (Reflektif'e uygunluk). why_now = neden şimdi iyi hedef (TR, kısa).",
+      "JSON: {segment, entity_type, icp_score, why_now}. segment ∈ {b2b_edu, b2b2c_ld, b2b_pro, b2c}. b2b_pro = bağımsız/serbest kariyer koçu, psikolojik danışman, terapist gibi BİREYSEL profesyonel (kurum değil; aracı bizzat kendi pratiğinde kullanan kişi). entity_type ∈ {tacir, kamu, birey, bilinmiyor}. icp_score 0-100 SAYI (Reflektif'e uygunluk). why_now = neden şimdi iyi hedef (TR, kısa).",
     user: `KURUM: ${orgName}\nURL: ${url}\n--- İÇERİK ---\n${text.slice(0, 6000)}`,
   });
   const icp = Math.max(0, Math.min(100, Math.round(cls.icp_score)));
+  const segment = normSegment(cls.segment);
+  const entityType = normEntity(cls.entity_type);
   await query(`update lead_companies set name=$2, segment=$3, entity_type=$4, icp_score=$5, signals=$6, evidence_url=$7 where id=$1`, [
     companyId,
     orgName,
-    normSegment(cls.segment),
-    normEntity(cls.entity_type),
+    segment,
+    entityType,
     icp,
     JSON.stringify({ why_now: cls.why_now }),
     url,
@@ -329,13 +351,19 @@ export const leadgenEnrich: Handler = async (job) => {
       if (!emailByAddr.has(e.email)) emailByAddr.set(e.email, { ...e, pageUrl: p.pageUrl });
     }
   }
-  const emails = [...emailByAddr.values()].filter((e) => e.generic); // Faz 1b: yalnız jenerik kurumsal kutu (KVKK hijyeni)
+  // Faz 1b: varsayılan olarak yalnız jenerik kurumsal kutu (KVKK hijyeni); b2b_pro istisnası: TECHNICAL_LOCALS
+  // zaten extractEmails()'te elendiği için isim-bazlı adresler de (kişinin kendi yayınladığı sayfada
+  // bulunduğu için) güvenle kabul edilir. İstisna İKİ bağımsız sinyalin (segment VE entity_type) aynı anda
+  // "bireysel profesyonel" demesini şart koşar — tek sinyale (yalnız segment) güvenmek, bir sınıflandırma
+  // hatasını doğrudan yanlış bir consent_basis audit-kaydına dönüştürebilir.
+  const isB2bProIndividual = segment === "b2b_pro" && entityType === "birey";
+  const emails = [...emailByAddr.values()].filter((e) => e.generic || isB2bProIndividual);
   let contacts = 0;
   for (const e of emails) {
     const ins = await query<{ id: number }>(
-      `insert into lead_contacts(company_id, email, is_generic_corporate, email_status, status, evidence_url)
-       values ($1,$2,true,'unknown','new',$3) on conflict (email) do nothing returning id`,
-      [companyId, e.email, e.pageUrl],
+      `insert into lead_contacts(company_id, email, is_generic_corporate, consent_basis, email_status, status, evidence_url)
+       values ($1,$2,$3,$4,'unknown','new',$5) on conflict (email) do nothing returning id`,
+      [companyId, e.email, e.generic, e.generic ? null : "self_published_professional_contact", e.pageUrl],
     );
     const id = ins.rows[0]?.id;
     if (id) {
@@ -347,7 +375,7 @@ export const leadgenEnrich: Handler = async (job) => {
     loop: "leadgen",
     action: "enrich.done",
     target: c.name,
-    detail: { icp, segment: normSegment(cls.segment), contacts, pagesChecked: contactPaths.length, pagesFound },
+    detail: { icp, segment, contacts, pagesChecked: contactPaths.length, pagesFound },
   });
   log.info({ company: c.name, icp, contacts }, "enrich tamam");
   return { costUsd: 0 };

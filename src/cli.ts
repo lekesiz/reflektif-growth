@@ -4,7 +4,7 @@ import { runWorkerTurn } from "./core/worker";
 import { enqueue, reapExpired } from "./core/queue";
 import { pause, resume } from "./core/switches";
 import { query, pool } from "./db/pool";
-import { extractOrgLinks, discoverContactPaths } from "./loops/leadgen";
+import { extractOrgLinks, discoverContactPaths, normSegment } from "./loops/leadgen";
 import { childLogger } from "./core/logger";
 
 const log = childLogger("cli");
@@ -87,6 +87,28 @@ async function smoke(): Promise<void> {
   }
   if (contactPaths.some((u) => u.includes("hakkimizda") || u.includes("baska-domain.com"))) {
     throw new Error(`SMOKE FAILED: contact-path gürültü içeriyor → ${JSON.stringify(contactPaths)}`);
+  }
+
+  // leadgen normSegment — deterministik (ağsız, LLM'siz) doğrulama; b2b_pro eklenirken mevcut
+  // edu/ld regresyonlarının bozulmadığından ve 'danışmanlık'ın b2b_pro'ya sızmadığından emin ol.
+  const segChecks: Array<[string, string]> = [
+    ["Bağımsız kariyer koçu", "b2b_pro"],
+    ["Üniversite kariyer merkezi", "b2b_edu"],
+    ["Kurumsal İK danışmanlığı firması", "b2b2c_ld"],
+    ["Psikolog - bireysel danışmanlık", "b2b_pro"],
+    // 'bağımsız'/'koç'/'serbest' kurumsal metinlerle çakıştığında b2b2c_ld kazanmalı (regresyon).
+    ["Bağımsız İK Danışmanlığı Firması", "b2b2c_ld"],
+    ["Bağımsız Denetim ve Danışmanlık A.Ş.", "b2b2c_ld"],
+    ["Koç Holding İnsan Kaynakları Kurumu", "b2b2c_ld"],
+    ["Serbest Bölge Kurumsal Danışmanlık", "b2b2c_ld"],
+    // LLM'in literal enum değerini birebir döndürdüğü durum (regresyon: önceden sessizce b2c'ye düşüyordu).
+    ["b2b_pro", "b2b_pro"],
+  ];
+  for (const [input, expected] of segChecks) {
+    const got = normSegment(input);
+    if (got !== expected) {
+      throw new Error(`SMOKE FAILED: normSegment(${JSON.stringify(input)}) → ${got}, beklenen ${expected}`);
+    }
   }
 
   console.log("SMOKE_PASS");
