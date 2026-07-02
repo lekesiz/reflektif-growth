@@ -1,14 +1,37 @@
 import { isEnabled } from "./core/switches";
 import { runWorkerTurn } from "./core/worker";
-import { reapExpired, type Loop } from "./core/queue";
+import { enqueue, reapExpired, type Loop } from "./core/queue";
+import { query } from "./db/pool";
 import { audit } from "./core/audit";
 import { childLogger } from "./core/logger";
 import { env } from "./config/env";
 
 const log = childLogger("tick");
 
-// launchd entrypoint: (1) crash kurtarma reaper, (2) GLOBAL kill-switch, (3) enqueue-due (Faz 1+),
-// (4) worker turları. Makine uyanınca çalışır; staleness guard (Faz 1+ enqueue'da) birikmeyi patlatmaz.
+function isoDay(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+function isoWeekKey(): string {
+  const d = new Date();
+  const week = Math.floor((Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - Date.UTC(d.getUTCFullYear(), 0, 1)) / (7 * 86_400_000));
+  return `${d.getUTCFullYear()}-W${week}`;
+}
+
+// Vadesi gelen işleri enqueue et (dedupe_key ile idempotent → uyanışta tekrar patlamaz).
+async function enqueueDue(): Promise<void> {
+  if (await isEnabled("compintel")) {
+    const comps = (await query<{ id: number }>(`select id from competitors where active=true`)).rows;
+    const today = isoDay();
+    for (const c of comps) {
+      await enqueue({ loop: "compintel", kind: "compintel:snapshot", payload: { competitorId: c.id }, dedupeKey: `snapshot:${c.id}:${today}`, priority: 50 });
+    }
+    // Haftalık digest (bir hafta bir kez)
+    await enqueue({ loop: "compintel", kind: "compintel:digest", payload: {}, dedupeKey: `digest:${isoWeekKey()}`, priority: 200 });
+  }
+  // Faz 2: leadgen source/drip enqueue-due buraya (staleness-guard'lı)
+}
+
+// launchd entrypoint.
 export async function tick(): Promise<void> {
   const reaped = await reapExpired();
   if (reaped > 0) log.warn({ reaped }, "expired lease geri alındı");
@@ -18,12 +41,12 @@ export async function tick(): Promise<void> {
     return;
   }
 
-  // Faz 1+: burada enqueue-due gelir (competitor snapshot, lead source, drip) — staleness guard'lı.
-  // Faz 0: yalnız bekleyen işleri işle.
+  await enqueueDue();
+
   const loops: Array<[Loop, string[]]> = [
     ["test", ["test:echo"]],
-    ["compintel", []], // Faz 1 kinds
-    ["leadgen", []], // Faz 1 kinds
+    ["compintel", ["compintel:snapshot", "compintel:gap", "compintel:digest"]],
+    ["leadgen", []], // Faz 2
   ];
 
   let processed = 0;

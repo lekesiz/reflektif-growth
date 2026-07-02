@@ -1,21 +1,19 @@
 import { childLogger } from "../core/logger";
-import type { AgentJob } from "../core/queue";
+import type { Handler } from "../core/handler";
+import { compintelSnapshot, compintelGap, compintelDigest } from "../loops/compintel";
 
 const log = childLogger("handler");
 
-export interface HandlerResult {
-  costUsd?: number;
-}
-
-export type Handler = (job: AgentJob) => Promise<HandlerResult>;
-
-// Handler kaydı. Faz 1'de competitor-intel + lead-gen handler'ları buraya eklenir:
-//   "compintel:snapshot", "compintel:diff", "leadgen:source", "leadgen:verify",
-//   "leadgen:enrich", "leadgen:draft" ...  (her biri LLM-önerir / kod-karar-verir)
+// Handler kaydı. Faz 2'de leadgen:* handler'ları (source/verify/enrich/draft) eklenir.
 export const handlers: Record<string, Handler> = {
-  // Faz 0 smoke handler
+  // Faz 0 smoke
   "test:echo": async (job) => {
     log.info({ jobId: job.id, payload: job.payload }, "test:echo işlendi");
     return { costUsd: 0 };
   },
+
+  // Faz 1a — competitor / pazar istihbaratı
+  "compintel:snapshot": compintelSnapshot,
+  "compintel:gap": compintelGap,
+  "compintel:digest": compintelDigest,
 };
