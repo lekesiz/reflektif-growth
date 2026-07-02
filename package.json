@@ -1,0 +1,33 @@
+{
+  "name": "reflektif-growth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bağımsız, lokal, tam-otonom büyüme-destek motoru (competitor-intel + lead-gen + çok-kanal outreach). Reflektif ürünü ile SIFIR paylaşım.",
+  "engines": { "node": ">=22" },
+  "packageManager": "pnpm@10.10.0",
+  "scripts": {
+    "cli": "tsx src/cli.ts",
+    "migrate": "tsx src/cli.ts migrate",
+    "tick": "tsx src/cli.ts tick",
+    "worker": "tsx src/cli.ts worker",
+    "status": "tsx src/cli.ts status",
+    "reaper": "tsx src/cli.ts reaper",
+    "pause": "tsx src/cli.ts pause",
+    "resume": "tsx src/cli.ts resume",
+    "smoke": "tsx src/cli.ts smoke",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "pg": "^8.13.1",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3"
+  }
+}

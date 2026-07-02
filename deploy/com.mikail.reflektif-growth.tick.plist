@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent — reflektif-growth tick (her 15 dk).
+  Kur:  cp deploy/com.mikail.reflektif-growth.tick.plist ~/Library/LaunchAgents/
+        launchctl load ~/Library/LaunchAgents/com.mikail.reflektif-growth.tick.plist
+  Kaldır: launchctl unload ~/Library/LaunchAgents/com.mikail.reflektif-growth.tick.plist
+  Not: PATH'e node + postgres@15 eklendi. tsx pnpm ile kurulur.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.mikail.reflektif-growth.tick</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>cd /Users/mikail/reflektif-growth &amp;&amp; /opt/homebrew/bin/pnpm tick</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/opt/homebrew/opt/postgresql@15/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartInterval</key><integer>900</integer>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>/Users/mikail/reflektif-growth/logs/tick.out.log</string>
+  <key>StandardErrorPath</key><string>/Users/mikail/reflektif-growth/logs/tick.err.log</string>
+</dict>
+</plist>
