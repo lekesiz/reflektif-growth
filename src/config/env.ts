@@ -32,6 +32,9 @@ const Env = z.object({
   // --- Competitor-intel ---
   FETCH_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
   GAP_MIN_CONFIDENCE: z.coerce.number().min(0).max(1).default(0.6),
+
+  // --- Lead sourcing ---
+  SOURCE_MAX_CANDIDATES_PER_RUN: z.coerce.number().int().positive().default(40),
 });
 
 export const env = Env.parse(process.env);

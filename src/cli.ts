@@ -4,6 +4,7 @@ import { runWorkerTurn } from "./core/worker";
 import { enqueue, reapExpired } from "./core/queue";
 import { pause, resume } from "./core/switches";
 import { query, pool } from "./db/pool";
+import { extractOrgLinks } from "./loops/leadgen";
 import { childLogger } from "./core/logger";
 
 const log = childLogger("cli");
@@ -49,6 +50,27 @@ async function smoke(): Promise<void> {
 
   if (dup !== null) throw new Error("SMOKE FAILED: idempotency");
   if (paused !== "paused") throw new Error("SMOKE FAILED: kill-switch");
+
+  // leadgen sourcing extractor — deterministik (ağsız) doğrulama.
+  const fixture = `<html><body>
+    <a href="/dahili">iç</a>
+    <a href="https://tr.wikipedia.org/wiki/x">kaynak-içi</a>
+    <a href="https://www.facebook.com/foo">sosyal</a>
+    <a href="mailto:a@b.com">mail</a>
+    <a href="https://www.itu.edu.tr/">&#304;stanbul Teknik &#220;niversitesi</a>
+    <a href="https://itu.edu.tr/tekrar">ITÜ tekrar (dedupe)</a>
+    <a href="https://www.example.com/">özel şirket (filtre dışı)</a>
+  </body></html>`;
+  const src = "https://tr.wikipedia.org/wiki/liste";
+  const all = extractOrgLinks(fixture, src);
+  const eduOnly = extractOrgLinks(fixture, src, "\\.edu\\.tr$");
+  log.info({ all: all.map((c) => c.domain), eduOnly: eduOnly.map((c) => c.domain) }, "sourcing extractor");
+  if (eduOnly.length !== 1 || eduOnly[0]?.domain !== "itu.edu.tr" || eduOnly[0]?.name !== "İstanbul Teknik Üniversitesi") {
+    throw new Error(`SMOKE FAILED: sourcing filter → ${JSON.stringify(eduOnly)}`);
+  }
+  if (all.some((c) => c.domain.includes("facebook") || c.domain.includes("wikipedia")) || !all.some((c) => c.domain === "example.com")) {
+    throw new Error(`SMOKE FAILED: sourcing dedupe/infra → ${JSON.stringify(all)}`);
+  }
   console.log("SMOKE_PASS");
 }
 
@@ -91,6 +113,41 @@ async function main(): Promise<void> {
       }
       break;
     }
+    case "add-source": {
+      // add-source <url> [domainFilter] [name...]  → dizin ekle (tick otonom tarar)
+      const url = args[0];
+      if (!url) {
+        console.log("kullanım: add-source <url> [domainFilter-regex] [name...]");
+        break;
+      }
+      const domainFilter = args[1] && args[1] !== "-" ? args[1] : null;
+      let name = args.slice(2).join(" ");
+      if (!name) {
+        try {
+          name = new URL(url).hostname.replace(/^www\./, "");
+        } catch {
+          name = url;
+        }
+      }
+      const r = await query<{ id: number }>(
+        `insert into lead_sources(name, url, domain_filter)
+           values ($1,$2,$3)
+         on conflict (url) do update set name=excluded.name, domain_filter=excluded.domain_filter, active=true
+         returning id`,
+        [name, url, domainFilter],
+      );
+      log.info({ id: r.rows[0]?.id, url, domainFilter }, "dizin eklendi (aktif)");
+      break;
+    }
+    case "list-sources": {
+      const r = await query(
+        `select id, name, url, domain_filter, active,
+                (select count(*) from lead_companies lc where lc.source='dizin:'||ls.name)::int as leads
+           from lead_sources ls order by id`,
+      );
+      console.log("lead_sources:", r.rows);
+      break;
+    }
     case "reaper":
       log.info({ reaped: await reapExpired() }, "reaper");
       break;
@@ -110,7 +167,7 @@ async function main(): Promise<void> {
       break;
     default:
       console.log(
-        "komutlar: migrate | tick | worker | reaper | status | smoke | pause <loop> <reason> | resume <loop>",
+        "komutlar: migrate | tick | worker | reaper | status | smoke | add-lead <domain> [ad] | add-source <url> [filter] [ad] | list-sources | pause <loop> <reason> | resume <loop>",
       );
   }
 }

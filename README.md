@@ -6,8 +6,10 @@ Bağımsız, **lokal**, tam-otonom büyüme-destek motoru: competitor-intel + le
 > Spec: `~/reflektif-growth-SPEC-2026-07-02.md` · Fizibilite: `reflektif-fresh/docs/GROWTH-ENGINE-FEASIBILITY-2026-07-02.md`
 
 ## Durum
-- **Faz 0 (iskele)** — ✅ bu commit: lokal Postgres şeması + kuyruk (`agent_jobs` + `claim_agent_job` SKIP LOCKED) + kill-switch + cost-cap + append-only audit + state-machine + launchd tick + CLI.
-- Faz 1 (competitor-intel + lead-gen DRAFT), Faz 2 (çok-kanal gönderim), Faz 3 (tam-otonom canlı ramp) — sırada.
+- **Faz 0 (iskele)** — ✅ lokal Postgres şeması + kuyruk (`agent_jobs` + `claim_agent_job` SKIP LOCKED) + kill-switch + cost-cap + append-only audit + state-machine + launchd tick + CLI.
+- **Faz 1a (competitor-intel)** — ✅ snapshot → gap → digest.
+- **Faz 1b (lead-gen DRAFT)** — ✅ **source** → enrich → verify → draft. Sourcing OTONOM: `lead_sources` dizinlerinden (`domain_filter` regex ile yüksek-sinyal) kurum keşfi; enrich `<title>`'dan otoriter isim + ICP; her çıktı `draft_for_review` (GÖNDERİM YOK).
+- Faz 2 (çok-kanal gönderim), Faz 3 (tam-otonom canlı ramp) — sırada (dış-TODO bekliyor).
 
 ## Kurulum (lokal, Docker gerekmez)
 ```bash
@@ -25,7 +27,10 @@ pnpm smoke                   # uçtan-uca doğrulama (enqueue→claim→done + i
 | `pnpm migrate` | Bekleyen SQL migration'ları uygula |
 | `pnpm tick` | launchd entrypoint: reaper + GLOBAL-kontrol + worker turları |
 | `pnpm status` | switches + job sayıları + günlük maliyet + son audit |
-| `pnpm smoke` | Faz 0 uçtan-uca test |
+| `pnpm smoke` | Faz 0 + sourcing-extractor uçtan-uca test |
+| `pnpm cli add-source <url> [filtre] [ad]` | lead dizini ekle (tick otonom tarar; `filtre` = host JS-regex, ör. `\.edu\.tr$`) |
+| `pnpm cli list-sources` | tanımlı dizinler + her birinden gelen lead sayısı |
+| `pnpm cli add-lead <domain> [ad]` | tek lead ekle (manuel curation) |
 | `pnpm cli pause <loop> <sebep>` / `resume <loop>` | kill-switch (`GLOBAL`/`compintel`/`leadgen`/`test`) |
 | `pnpm reaper` | lease'i geçmiş işleri geri al |
 

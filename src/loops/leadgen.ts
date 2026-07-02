@@ -5,32 +5,48 @@ import { env } from "../config/env";
 import { audit } from "../core/audit";
 import { enqueue } from "../core/queue";
 import { assertLeadTransition } from "../core/stateMachine";
+import { markIfChanged } from "../core/seen";
+import { fetchRaw } from "../core/http";
 import { bulkJson, writerJson } from "../llm/index";
 import { childLogger } from "../core/logger";
 
 const log = childLogger("leadgen");
 
 // ----- yardımcılar -----
+const NAMED_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => { try { return String.fromCodePoint(parseInt(h, 16)); } catch { return " "; } })
+    .replace(/&#(\d+);/g, (_, d) => { try { return String.fromCodePoint(parseInt(d, 10)); } catch { return " "; } })
+    .replace(/&([a-z]+);/gi, (_, n) => NAMED_ENTITIES[String(n).toLowerCase()] ?? " ");
+}
 function htmlToText(html: string): string {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&[a-z]+;/gi, " ")
+  return decodeEntities(
+    html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " "),
+  )
     .replace(/\s+/g, " ")
     .trim();
 }
-async function fetchText(url: string): Promise<{ status: number; text: string }> {
-  try {
-    const res = await fetch(url, {
-      headers: { "user-agent": "reflektif-growth-bot/0.1 (+https://reflektif.info)" },
-      signal: AbortSignal.timeout(env.FETCH_TIMEOUT_MS),
-      redirect: "follow",
-    });
-    return { status: res.status, text: htmlToText(await res.text()).slice(0, 20_000) };
-  } catch {
-    return { status: 0, text: "" };
-  }
+// <title> içeriği — kurumun kendi sayfasından otoriter isim (sourcing anchor-metni gürültülü olabilir).
+function extractTitle(html: string): string {
+  const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (!m) return "";
+  // "Anasayfa | X Üniv." / "X Üniv. | slogan" → ayraçlarla böl, İLK anlamlı parça (genelde kurum adı).
+  const full = htmlToText(m[1] ?? "");
+  const parts = full
+    .split(/\s[|»\-–—:]\s/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 3 && !/^(ana ?sayfa|home|anasayfa|welcome|hoş ?geldiniz)$/i.test(s));
+  return (parts[0] ?? full).slice(0, 120);
+}
+
+// Ham HTML (link'ler + <title> için; TLS-toleranslı crawler fetch — TR kurumsal siteler için).
+async function fetchHtml(url: string): Promise<{ status: number; html: string }> {
+  const { status, body } = await fetchRaw(url);
+  return { status, html: body };
 }
 
 const GENERIC_LOCALS = ["info", "bilgi", "iletisim", "ik", "kariyer", "insankaynaklari", "destek", "contact", "hello", "admin", "kayit", "ogrenci"];
@@ -49,6 +65,76 @@ function extractEmails(text: string, domain: string): Array<{ email: string; gen
   return out;
 }
 
+// ----- sourcing: dizin sayfasından kurum linki çıkarımı (saf, deterministik) -----
+// Sosyal/altyapı/CDN host'ları — lead değil. Suffix eşleşmesi (subdomain'leri de yakalar).
+const INFRA_HOSTS = [
+  "facebook.com", "twitter.com", "x.com", "instagram.com", "linkedin.com", "youtube.com", "youtu.be",
+  "whatsapp.com", "wa.me", "t.me", "telegram.me", "pinterest.com", "tiktok.com", "apple.com",
+  "google.com", "goo.gl", "gstatic.com", "googleapis.com", "googletagmanager.com", "google-analytics.com",
+  "w3.org", "schema.org", "creativecommons.org", "gnu.org", "mozilla.org", "jquery.com", "bootstrapcdn.com",
+  "wikimedia.org", "wikidata.org", "mediawiki.org", "archive.org", "doi.org", "worldcat.org",
+];
+function isInfraHost(host: string): boolean {
+  return INFRA_HOSTS.some((h) => host === h || host.endsWith("." + h));
+}
+// TR/ccTLD ikinci-seviye alan adları — registrable domain'i 3 parçaya çıkar (ör. itu.edu.tr).
+const CCTLD_SLD = new Set(["com", "org", "net", "edu", "gov", "gen", "av", "dr", "bel", "pol", "tsk", "k12", "mil", "co", "ac"]);
+function registrable(host: string): string {
+  const p = host.split(".");
+  if (p.length <= 2) return host;
+  const tld = p.at(-1) ?? "";
+  if (tld.length === 2 && CCTLD_SLD.has(p.at(-2) ?? "")) return p.slice(-3).join(".");
+  return p.slice(-2).join(".");
+}
+
+export interface OrgCandidate {
+  name: string;
+  domain: string;
+}
+
+// HTML'den dış kurum linklerini çıkar. domainFilter (JS-regex) verilirse yalnız eşleşen host'lar
+// aday olur (naif "tüm dış linkler" gürültüsünü keser). Kaynağın kendi domain'i + altyapı host'ları elenir.
+export function extractOrgLinks(html: string, sourceUrl: string, domainFilter?: string | null): OrgCandidate[] {
+  let filter: RegExp | null = null;
+  if (domainFilter) {
+    try {
+      filter = new RegExp(domainFilter, "i");
+    } catch {
+      filter = null; // bozuk regex → filtre yok (fail-open; downstream enrich yine ICP süzer)
+    }
+  }
+  let srcReg = "";
+  try {
+    srcReg = registrable(new URL(sourceUrl).hostname.toLowerCase().replace(/^www\./, ""));
+  } catch {
+    /* geçersiz sourceUrl → iç-link elemesi atlanır */
+  }
+  const out: OrgCandidate[] = [];
+  const seen = new Set<string>();
+  const re = /<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  for (const m of html.matchAll(re)) {
+    const href = m[1] ?? "";
+    if (/^(mailto:|tel:|javascript:|#)/i.test(href)) continue;
+    let host: string;
+    try {
+      const u = new URL(href, sourceUrl);
+      if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+      host = u.hostname.toLowerCase().replace(/^www\./, "");
+    } catch {
+      continue;
+    }
+    if (!host.includes(".") || /^\d+(\.\d+){3}$/.test(host)) continue;
+    if (srcReg && (host === srcReg || host.endsWith("." + srcReg))) continue; // iç link
+    if (isInfraHost(host)) continue;
+    if (filter && !filter.test(host)) continue;
+    if (seen.has(host)) continue;
+    seen.add(host);
+    const name = htmlToText(m[2] ?? "").slice(0, 200) || host;
+    out.push({ name, domain: host });
+  }
+  return out;
+}
+
 // Deny-by-default gönderim kapısı (Faz 3 send'in kullanacağı; Faz 1b'de sadece HESAPLANIR).
 export async function canSend(email: string): Promise<{ ok: boolean; reason?: string }> {
   if ((await query(`select 1 from suppression_list where email=$1`, [email])).rowCount) return { ok: false, reason: "suppressed" };
@@ -57,6 +143,49 @@ export async function canSend(email: string): Promise<{ ok: boolean; reason?: st
   if (row.email_status !== "valid") return { ok: false, reason: `email_status=${row.email_status}` };
   return { ok: true };
 }
+
+// ----- leadgen:source (dizin sayfası → yeni lead_companies + enrich enqueue; GÖNDERİM YOK) -----
+interface SourceRow {
+  id: number;
+  name: string;
+  url: string;
+  domain_filter: string | null;
+}
+
+export const leadgenSource: Handler = async (job) => {
+  const sourceId = Number((job.payload as { sourceId?: number }).sourceId);
+  const s = (
+    await query<SourceRow>(`select id,name,url,domain_filter from lead_sources where id=$1 and active=true`, [sourceId])
+  ).rows[0];
+  if (!s) return { costUsd: 0 };
+  const { status, html } = await fetchHtml(s.url);
+  if (status !== 200 || !html) {
+    await audit({ loop: "leadgen", action: "source.fetch_failed", target: s.name, detail: { url: s.url, status } });
+    return { costUsd: 0 };
+  }
+  // Dizin değişmediyse tekrar taramaya gerek yok (maliyet+gürültü); mevcut adaylar zaten pipeline'da.
+  if (!(await markIfChanged(`source:${s.id}`, html))) {
+    await audit({ loop: "leadgen", action: "source.unchanged", target: s.name });
+    return { costUsd: 0 };
+  }
+  const candidates = extractOrgLinks(html, s.url, s.domain_filter).slice(0, env.SOURCE_MAX_CANDIDATES_PER_RUN);
+  let added = 0;
+  for (const c of candidates) {
+    const ins = await query<{ id: number }>(
+      `insert into lead_companies(name, domain, source, region, evidence_url)
+       values ($1,$2,$3,'TR',$4) on conflict (domain) do nothing returning id`,
+      [c.name, c.domain, `dizin:${s.name}`, s.url],
+    );
+    const id = ins.rows[0]?.id;
+    if (id) {
+      added++;
+      await enqueue({ loop: "leadgen", kind: "leadgen:enrich", payload: { companyId: id }, dedupeKey: `enrich:${c.domain}` });
+    }
+  }
+  await audit({ loop: "leadgen", action: "source.done", target: s.name, detail: { found: candidates.length, added } });
+  log.info({ source: s.name, found: candidates.length, added }, "sourcing tamam");
+  return { costUsd: 0 };
+};
 
 // ----- leadgen:enrich -----
 // Esnek: sparse sitede model bazı alanları boş bırakabilir → default'la (kod normalize eder).
@@ -85,11 +214,14 @@ export const leadgenEnrich: Handler = async (job) => {
   const c = (await query<{ id: number; name: string; domain: string | null }>(`select id,name,domain from lead_companies where id=$1`, [companyId])).rows[0];
   if (!c || !c.domain) return { costUsd: 0 };
   const url = c.domain.startsWith("http") ? c.domain : `https://${c.domain}`;
-  const { status, text } = await fetchText(url);
-  if (status !== 200 || !text) {
+  const { status, html } = await fetchHtml(url);
+  if (status !== 200 || !html) {
     await audit({ loop: "leadgen", action: "enrich.fetch_failed", target: c.name, detail: { url, status } });
     return { costUsd: 0 };
   }
+  const text = htmlToText(html).slice(0, 20_000);
+  // Kurumun kendi <title>'ı = otoriter isim (sourcing anchor-metni gürültülü olabilir).
+  const orgName = extractTitle(html) || c.name;
   const cls = await bulkJson({
     loop: "leadgen",
     jobId: job.id,
@@ -97,11 +229,12 @@ export const leadgenEnrich: Handler = async (job) => {
     system:
       "Sen Reflektif (kariyer-rehberlik/bilan SaaS) için lead nitelendiricisin. Verilen kurumun public site metninden sınıflandır. Uydurma; yalnız metne dayan.\n" +
       "JSON: {segment, entity_type, icp_score, why_now}. segment ∈ {b2b_edu, b2b2c_ld, b2c}. entity_type ∈ {tacir, kamu, birey, bilinmiyor}. icp_score 0-100 SAYI (Reflektif'e uygunluk). why_now = neden şimdi iyi hedef (TR, kısa).",
-    user: `KURUM: ${c.name}\nURL: ${url}\n--- İÇERİK ---\n${text.slice(0, 6000)}`,
+    user: `KURUM: ${orgName}\nURL: ${url}\n--- İÇERİK ---\n${text.slice(0, 6000)}`,
   });
   const icp = Math.max(0, Math.min(100, Math.round(cls.icp_score)));
-  await query(`update lead_companies set segment=$2, entity_type=$3, icp_score=$4, signals=$5, evidence_url=$6 where id=$1`, [
+  await query(`update lead_companies set name=$2, segment=$3, entity_type=$4, icp_score=$5, signals=$6, evidence_url=$7 where id=$1`, [
     companyId,
+    orgName,
     normSegment(cls.segment),
     normEntity(cls.entity_type),
     icp,

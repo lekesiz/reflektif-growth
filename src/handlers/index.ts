@@ -1,7 +1,7 @@
 import { childLogger } from "../core/logger";
 import type { Handler } from "../core/handler";
 import { compintelSnapshot, compintelGap, compintelDigest } from "../loops/compintel";
-import { leadgenEnrich, leadgenVerify, leadgenDraft } from "../loops/leadgen";
+import { leadgenSource, leadgenEnrich, leadgenVerify, leadgenDraft } from "../loops/leadgen";
 
 const log = childLogger("handler");
 
@@ -19,6 +19,7 @@ export const handlers: Record<string, Handler> = {
   "compintel:digest": compintelDigest,
 
   // Faz 1b — lead-gen DRAFT pipeline (gönderim YOK; hepsi draft_for_review)
+  "leadgen:source": leadgenSource,
   "leadgen:enrich": leadgenEnrich,
   "leadgen:verify": leadgenVerify,
   "leadgen:draft": leadgenDraft,

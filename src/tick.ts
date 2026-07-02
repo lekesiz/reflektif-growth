@@ -28,7 +28,14 @@ async function enqueueDue(): Promise<void> {
     // Haftalık digest (bir hafta bir kez)
     await enqueue({ loop: "compintel", kind: "compintel:digest", payload: {}, dedupeKey: `digest:${isoWeekKey()}`, priority: 200 });
   }
-  // Faz 2: leadgen source/drip enqueue-due buraya (staleness-guard'lı)
+  // leadgen sourcing: aktif her dizini günde bir kez tara (dedupe_key ile staleness-guard'lı).
+  if (await isEnabled("leadgen")) {
+    const srcs = (await query<{ id: number }>(`select id from lead_sources where active=true`)).rows;
+    const today = isoDay();
+    for (const s of srcs) {
+      await enqueue({ loop: "leadgen", kind: "leadgen:source", payload: { sourceId: s.id }, dedupeKey: `source:${s.id}:${today}`, priority: 60 });
+    }
+  }
 }
 
 // launchd entrypoint.
@@ -46,7 +53,7 @@ export async function tick(): Promise<void> {
   const loops: Array<[Loop, string[]]> = [
     ["test", ["test:echo"]],
     ["compintel", ["compintel:snapshot", "compintel:gap", "compintel:digest"]],
-    ["leadgen", ["leadgen:enrich", "leadgen:verify", "leadgen:draft"]],
+    ["leadgen", ["leadgen:source", "leadgen:enrich", "leadgen:verify", "leadgen:draft"]],
   ];
 
   let processed = 0;
