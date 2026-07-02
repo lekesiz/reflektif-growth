@@ -46,7 +46,7 @@ export async function tick(): Promise<void> {
   const loops: Array<[Loop, string[]]> = [
     ["test", ["test:echo"]],
     ["compintel", ["compintel:snapshot", "compintel:gap", "compintel:digest"]],
-    ["leadgen", []], // Faz 2
+    ["leadgen", ["leadgen:enrich", "leadgen:verify", "leadgen:draft"]],
   ];
 
   let processed = 0;

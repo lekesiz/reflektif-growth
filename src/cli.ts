@@ -71,6 +71,26 @@ async function main(): Promise<void> {
       log.info({ ran }, "worker bitti");
       break;
     }
+    case "add-lead": {
+      // add-lead <domain> [name]  → kurum ekle + enrich enqueue (manuel curation girişi)
+      const domain = args[0];
+      if (!domain) {
+        console.log("kullanım: add-lead <domain> [name]");
+        break;
+      }
+      const name = args.slice(1).join(" ") || domain;
+      const r = await query<{ id: number }>(
+        `insert into lead_companies(name, domain, source) values ($1,$2,'manual')
+         on conflict (domain) do update set name=excluded.name returning id`,
+        [name, domain],
+      );
+      const id = r.rows[0]?.id;
+      if (id) {
+        await enqueue({ loop: "leadgen", kind: "leadgen:enrich", payload: { companyId: id }, dedupeKey: `enrich:${domain}` });
+        log.info({ id, domain }, "lead eklendi + enrich kuyruğa");
+      }
+      break;
+    }
     case "reaper":
       log.info({ reaped: await reapExpired() }, "reaper");
       break;

@@ -3,13 +3,13 @@ import { env } from "../config/env";
 
 // Ollama /api/chat — JSON-mode + thinking kapalı; <think> defensive strip; zod-validate.
 // Halüsinasyon guard'ının teknik zemini: serbest metin değil, ŞEMALI çıktı.
-export async function ollamaJson<T>(opts: {
+export async function ollamaJson<S extends z.ZodTypeAny>(opts: {
   model?: string;
   system: string;
   user: string;
-  schema: z.ZodType<T>;
+  schema: S;
   temperature?: number;
-}): Promise<T> {
+}): Promise<z.infer<S>> {
   const model = opts.model ?? env.OLLAMA_BULK_MODEL;
   const ctrl = new AbortController();
   const to = setTimeout(() => ctrl.abort(), env.OLLAMA_TIMEOUT_MS);
@@ -42,7 +42,7 @@ export async function ollamaJson<T>(opts: {
       if (!m) throw new Error(`ollama JSON parse edilemedi: ${raw.slice(0, 200)}`);
       parsed = JSON.parse(m[0]);
     }
-    return opts.schema.parse(parsed);
+    return opts.schema.parse(parsed) as z.infer<S>;
   } finally {
     clearTimeout(to);
   }
