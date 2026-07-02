@@ -39,6 +39,8 @@ const Env = z.object({
 
   // --- Lead sourcing ---
   SOURCE_MAX_CANDIDATES_PER_RUN: z.coerce.number().int().positive().default(40),
+  // enrich: ana sayfadan keşfedilen iletişim/kariyer alt-sayfalarından en fazla kaç tanesi taranır (tek-hop).
+  LEADGEN_MAX_CONTACT_PAGES: z.coerce.number().int().positive().default(3),
 });
 
 export const env = Env.parse(process.env);

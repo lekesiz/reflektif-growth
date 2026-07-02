@@ -21,7 +21,9 @@ const crawlAgent = new Agent({
 const UA = "reflektif-growth-bot/0.1 (+https://reflektif.info)";
 
 // Ham gövde (TLS-toleranslı). Hata/timeout → status 0 (çağıran graceful ele alır; asla throw etmez).
-export async function fetchRaw(url: string, maxBytes = 2_000_000): Promise<{ status: number; body: string }> {
+// finalUrl: redirect:"follow" sonrası GERÇEK sayfa URL'i — relative link çözümü ve evidence_url için
+// istek atılan (redirect-öncesi) url yerine bu kullanılmalı.
+export async function fetchRaw(url: string, maxBytes = 2_000_000): Promise<{ status: number; body: string; finalUrl: string }> {
   try {
     const res = await undiciFetch(url, {
       headers: { "user-agent": UA },
@@ -29,8 +31,8 @@ export async function fetchRaw(url: string, maxBytes = 2_000_000): Promise<{ sta
       redirect: "follow",
       dispatcher: crawlAgent,
     });
-    return { status: res.status, body: (await res.text()).slice(0, maxBytes) };
+    return { status: res.status, body: (await res.text()).slice(0, maxBytes), finalUrl: res.url || url };
   } catch {
-    return { status: 0, body: "" };
+    return { status: 0, body: "", finalUrl: url };
   }
 }

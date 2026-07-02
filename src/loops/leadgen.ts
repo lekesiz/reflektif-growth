@@ -44,9 +44,10 @@ function extractTitle(html: string): string {
 }
 
 // Ham HTML (link'ler + <title> için; TLS-toleranslı crawler fetch — TR kurumsal siteler için).
-async function fetchHtml(url: string): Promise<{ status: number; html: string }> {
-  const { status, body } = await fetchRaw(url);
-  return { status, html: body };
+// finalUrl: redirect sonrası gerçek sayfa URL'i (relative link çözümü / evidence_url için url yerine kullanılmalı).
+async function fetchHtml(url: string): Promise<{ status: number; html: string; finalUrl: string }> {
+  const { status, body, finalUrl } = await fetchRaw(url);
+  return { status, html: body, finalUrl };
 }
 
 const GENERIC_LOCALS = ["info", "bilgi", "iletisim", "ik", "kariyer", "insankaynaklari", "destek", "contact", "hello", "admin", "kayit", "ogrenci"];
@@ -135,6 +136,73 @@ export function extractOrgLinks(html: string, sourceUrl: string, domainFilter?: 
   return out;
 }
 
+// ----- enrich: iletişim/kariyer alt-sayfa keşfi (saf, deterministik; tek-hop) -----
+const CONTACT_KEYWORDS = ["iletisim", "contact", "kariyer", "career", "insan-kaynaklari", "human-resources", "hr", "ik"];
+// TR aksan kırma — keyword listesi aksansız (ör. "iletisim"); anchor metni "İletişim" gibi aksanlı olabilir.
+function stripTrAccents(s: string): string {
+  return s
+    .toLowerCase()
+    // JS'in locale-bağımsız toLowerCase()'i büyük "İ" (U+0130) harfini düz "i" değil,
+    // "i" + birleştirici nokta-üstü işareti (U+0307) yapar — bu işareti at (aksi halde
+    // "İletişim"/"İK" gibi metinler CONTACT_KEYWORDS ile hiç eşleşmez).
+    .replace(/\u0307/g, "")
+    .replace(/ı/g, "i")
+    .replace(/ş/g, "s")
+    .replace(/ç/g, "c")
+    .replace(/ğ/g, "g")
+    .replace(/ö/g, "o")
+    .replace(/ü/g, "u");
+}
+function looksLikeContactLink(href: string, linkText: string): boolean {
+  const hay = stripTrAccents(href) + " " + stripTrAccents(linkText);
+  return CONTACT_KEYWORDS.some((k) => hay.includes(k));
+}
+
+// Ana sayfa HTML'inden iletişim/kariyer alt-sayfa URL'lerini bul (registrable domain'e göre extractOrgLinks
+// ile aynı iç/dış ayrımını paylaşır). Aday çıkmazsa yaygın yolları fallback dener. Recursive DEĞİL (tek-hop).
+export function discoverContactPaths(html: string, baseUrl: string): string[] {
+  let baseReg = "";
+  try {
+    baseReg = registrable(new URL(baseUrl).hostname.toLowerCase().replace(/^www\./, ""));
+  } catch {
+    return []; // geçersiz baseUrl → aday yok
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const re = /<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  for (const m of html.matchAll(re)) {
+    if (out.length >= env.LEADGEN_MAX_CONTACT_PAGES) break;
+    const href = m[1] ?? "";
+    if (/^(mailto:|tel:|javascript:|#)/i.test(href)) continue;
+    if (!looksLikeContactLink(href, htmlToText(m[2] ?? ""))) continue;
+    let abs: URL;
+    try {
+      abs = new URL(href, baseUrl);
+      if (abs.protocol !== "http:" && abs.protocol !== "https:") continue;
+    } catch {
+      continue;
+    }
+    if (registrable(abs.hostname.toLowerCase().replace(/^www\./, "")) !== baseReg) continue; // yalnız aynı kurum
+    abs.hash = "";
+    const url = abs.toString();
+    if (seen.has(url)) continue;
+    seen.add(url);
+    out.push(url);
+  }
+  if (out.length > 0) return out;
+  // Fallback: link taramasından hiç aday çıkmadıysa yaygın yolları dene (yine baseUrl'e göre çözülür, aynı üst sınır).
+  const fallback: string[] = [];
+  for (const p of ["/iletisim", "/contact", "/kariyer"]) {
+    if (fallback.length >= env.LEADGEN_MAX_CONTACT_PAGES) break;
+    try {
+      fallback.push(new URL(p, baseUrl).toString());
+    } catch {
+      /* geçersiz baseUrl zaten yukarıda elendi */
+    }
+  }
+  return fallback;
+}
+
 // Deny-by-default gönderim kapısı (Faz 3 send'in kullanacağı; Faz 1b'de sadece HESAPLANIR).
 export async function canSend(email: string): Promise<{ ok: boolean; reason?: string }> {
   if ((await query(`select 1 from suppression_list where email=$1`, [email])).rowCount) return { ok: false, reason: "suppressed" };
@@ -213,10 +281,10 @@ export const leadgenEnrich: Handler = async (job) => {
   const companyId = Number((job.payload as { companyId?: number }).companyId);
   const c = (await query<{ id: number; name: string; domain: string | null }>(`select id,name,domain from lead_companies where id=$1`, [companyId])).rows[0];
   if (!c || !c.domain) return { costUsd: 0 };
-  const url = c.domain.startsWith("http") ? c.domain : `https://${c.domain}`;
-  const { status, html } = await fetchHtml(url);
+  const reqUrl = c.domain.startsWith("http") ? c.domain : `https://${c.domain}`;
+  const { status, html, finalUrl: url } = await fetchHtml(reqUrl); // url: redirect sonrası GERÇEK sayfa URL'i (base + evidence_url için kullanılır)
   if (status !== 200 || !html) {
-    await audit({ loop: "leadgen", action: "enrich.fetch_failed", target: c.name, detail: { url, status } });
+    await audit({ loop: "leadgen", action: "enrich.fetch_failed", target: c.name, detail: { url: reqUrl, status } });
     return { costUsd: 0 };
   }
   const text = htmlToText(html).slice(0, 20_000);
@@ -241,13 +309,33 @@ export const leadgenEnrich: Handler = async (job) => {
     JSON.stringify({ why_now: cls.why_now }),
     url,
   ]);
-  const emails = extractEmails(text, c.domain).filter((e) => e.generic); // Faz 1b: yalnız jenerik kurumsal kutu (KVKK hijyeni)
+  // Tek-hop: ana sayfadan keşfedilen iletişim/kariyer alt-sayfalarını da tara (daha fazla contact için).
+  // Alt-sayfalardaki linkler TEKRAR takip EDİLMEZ (recursive crawl yok).
+  const contactPaths = discoverContactPaths(html, url);
+  const pages: Array<{ text: string; pageUrl: string }> = [{ text, pageUrl: url }];
+  let pagesFound = 0;
+  for (const contactUrl of contactPaths) {
+    const { status: cStatus, html: cHtml, finalUrl: cFinalUrl } = await fetchHtml(contactUrl); // best-effort: fetchRaw hata yutar, throw etmez
+    if (cStatus === 200 && cHtml) {
+      pagesFound++;
+      pages.push({ text: htmlToText(cHtml).slice(0, 20_000), pageUrl: cFinalUrl }); // redirect sonrası gerçek URL saklanır
+    }
+  }
+  // Tüm sayfalardan e-posta topla; email'e göre dedupe et — gerçek kaynağın URL'i evidence_url olarak SAKLANIR
+  // (ilk bulunduğu sayfa kazanır; ana sayfa listede ilk sırada olduğu için varsayılan olarak ona öncelik verir).
+  const emailByAddr = new Map<string, { email: string; generic: boolean; pageUrl: string }>();
+  for (const p of pages) {
+    for (const e of extractEmails(p.text, c.domain)) {
+      if (!emailByAddr.has(e.email)) emailByAddr.set(e.email, { ...e, pageUrl: p.pageUrl });
+    }
+  }
+  const emails = [...emailByAddr.values()].filter((e) => e.generic); // Faz 1b: yalnız jenerik kurumsal kutu (KVKK hijyeni)
   let contacts = 0;
   for (const e of emails) {
     const ins = await query<{ id: number }>(
       `insert into lead_contacts(company_id, email, is_generic_corporate, email_status, status, evidence_url)
        values ($1,$2,true,'unknown','new',$3) on conflict (email) do nothing returning id`,
-      [companyId, e.email, url],
+      [companyId, e.email, e.pageUrl],
     );
     const id = ins.rows[0]?.id;
     if (id) {
@@ -255,7 +343,12 @@ export const leadgenEnrich: Handler = async (job) => {
       await enqueue({ loop: "leadgen", kind: "leadgen:verify", payload: { contactId: id }, dedupeKey: `verify:${e.email}` });
     }
   }
-  await audit({ loop: "leadgen", action: "enrich.done", target: c.name, detail: { icp, segment: normSegment(cls.segment), contacts } });
+  await audit({
+    loop: "leadgen",
+    action: "enrich.done",
+    target: c.name,
+    detail: { icp, segment: normSegment(cls.segment), contacts, pagesChecked: contactPaths.length, pagesFound },
+  });
   log.info({ company: c.name, icp, contacts }, "enrich tamam");
   return { costUsd: 0 };
 };

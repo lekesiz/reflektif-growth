@@ -4,7 +4,7 @@ import { runWorkerTurn } from "./core/worker";
 import { enqueue, reapExpired } from "./core/queue";
 import { pause, resume } from "./core/switches";
 import { query, pool } from "./db/pool";
-import { extractOrgLinks } from "./loops/leadgen";
+import { extractOrgLinks, discoverContactPaths } from "./loops/leadgen";
 import { childLogger } from "./core/logger";
 
 const log = childLogger("cli");
@@ -71,6 +71,24 @@ async function smoke(): Promise<void> {
   if (all.some((c) => c.domain.includes("facebook") || c.domain.includes("wikipedia")) || !all.some((c) => c.domain === "example.com")) {
     throw new Error(`SMOKE FAILED: sourcing dedupe/infra → ${JSON.stringify(all)}`);
   }
+
+  // leadgen enrich alt-sayfa keşfi — deterministik (ağsız) doğrulama.
+  const contactFixture = `<html><body>
+    <a href="/iletisim">İletişim</a>
+    <a href="/kariyer">Kariyer</a>
+    <a href="/hakkimizda">Hakkımızda</a>
+    <a href="https://baska-domain.com/contact">dış site</a>
+  </body></html>`;
+  const contactBase = "https://ornekkurum.com/";
+  const contactPaths = discoverContactPaths(contactFixture, contactBase);
+  log.info({ contactPaths }, "contact-path extractor");
+  if (!contactPaths.includes("https://ornekkurum.com/iletisim") || !contactPaths.includes("https://ornekkurum.com/kariyer")) {
+    throw new Error(`SMOKE FAILED: contact-path bulunamadı → ${JSON.stringify(contactPaths)}`);
+  }
+  if (contactPaths.some((u) => u.includes("hakkimizda") || u.includes("baska-domain.com"))) {
+    throw new Error(`SMOKE FAILED: contact-path gürültü içeriyor → ${JSON.stringify(contactPaths)}`);
+  }
+
   console.log("SMOKE_PASS");
 }
 
