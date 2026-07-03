@@ -5,7 +5,7 @@ import { enqueue, reapExpired } from "./core/queue";
 import { pause, resume } from "./core/switches";
 import { query, pool } from "./db/pool";
 import { extractOrgLinks, discoverContactPaths, normSegment } from "./loops/leadgen";
-import { runJsonWithRepair } from "./llm/ollama";
+import { runJsonWithRepair } from "./llm/repair";
 import { z } from "zod";
 import { childLogger } from "./core/logger";
 
@@ -167,6 +167,21 @@ async function smoke(): Promise<void> {
   }
   if (onceCalls !== 1 || !threwOnce) {
     throw new Error(`SMOKE FAILED: maxAttempts=1 no-retry → calls=${onceCalls}, threw=${threwOnce}`);
+  }
+
+  // (D) Claude yolu (ağsız güvence): Anthropic'te format:"json" YOK → model bazen ```json ... ``` ile sarar.
+  // Paylaşılan repair.ts/parseJson ilk {...} bloğunu yakalayıp TEK denemede (repair'siz) kurtarmalı.
+  let fenceCalls = 0;
+  const fenced = await runJsonWithRepair({
+    schema: RepairSchema,
+    maxAttempts: 2,
+    generate: async () => {
+      fenceCalls++;
+      return '```json\n{"subject":"Merhaba Reflektif","body":"Bu yeterince uzun bir taslak gövdesidir."}\n```';
+    },
+  });
+  if (fenceCalls !== 1 || fenced.subject !== "Merhaba Reflektif" || fenced.body.length < 10) {
+    throw new Error(`SMOKE FAILED: markdown-fenced JSON kurtarılamadı → calls=${fenceCalls}, out=${JSON.stringify(fenced)}`);
   }
 
   console.log("SMOKE_PASS");

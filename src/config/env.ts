@@ -23,6 +23,18 @@ const Env = z.object({
   // ollamaJson() bir çağrıyı en fazla kaç kez dener (timeout / JSON-parse / zod-şema hatasında repair-reprompt ile tekrar).
   // 1 = retry yok = eski davranış (tek deneme). Her deneme KENDİ timeout'unu alır; retry'ler arası backoff YOK (lokal Ollama).
   OLLAMA_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(3),
+
+  // --- Anthropic Claude (nihai/dışa-dönük yazar: outreach taslağı + haftalık digest) ---
+  // Anahtar KODA yazılmaz — lokal .env'de (gitignore'lu). Yoksa writer router Vertex/Ollama'ya düşer.
+  ANTHROPIC_API_KEY: z.string().optional(),
+  ANTHROPIC_WRITER_MODEL: z.string().default("claude-haiku-4-5-20251001"),
+  ANTHROPIC_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+  // Haiku 4.5 fiyatları ($/1M token): girdi $1.00, çıktı $5.00 (Anthropic fiyat tablosu, 2026-06).
+  // NOT: fiyatlar değişebilir → periyodik DOĞRULANMALI. Cap gerçek maliyete dayandığı için,
+  // şüphedeyken yüksek tut (erken korur).
+  ANTHROPIC_PRICE_IN_PER_MTOK: z.coerce.number().nonnegative().default(1.0),
+  ANTHROPIC_PRICE_OUT_PER_MTOK: z.coerce.number().nonnegative().default(5.0),
+
   GOOGLE_CLOUD_PROJECT: z.string().optional(),
   GOOGLE_CLOUD_LOCATION: z.string().default("europe-west4"),
   GOOGLE_SERVICE_ACCOUNT_JSON: z.string().optional(),
