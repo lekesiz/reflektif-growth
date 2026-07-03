@@ -100,13 +100,23 @@ export interface OrgCandidate {
 
 // HTML'den dış kurum linklerini çıkar. domainFilter (JS-regex) verilirse yalnız eşleşen host'lar
 // aday olur (naif "tüm dış linkler" gürültüsünü keser). Kaynağın kendi domain'i + altyapı host'ları elenir.
-export function extractOrgLinks(html: string, sourceUrl: string, domainFilter?: string | null): OrgCandidate[] {
+// excludeFilter (JS-regex): host bununla eşleşirse aday ELENİR — dizinde karışan dernek-ekosistemi/
+// web-ajansı/gov host'larını temizler (domainFilter/infra/iç-link elemesine EK negatif filtre).
+export function extractOrgLinks(html: string, sourceUrl: string, domainFilter?: string | null, excludeFilter?: string | null): OrgCandidate[] {
   let filter: RegExp | null = null;
   if (domainFilter) {
     try {
       filter = new RegExp(domainFilter, "i");
     } catch {
       filter = null; // bozuk regex → filtre yok (fail-open; downstream enrich yine ICP süzer)
+    }
+  }
+  let exclude: RegExp | null = null;
+  if (excludeFilter) {
+    try {
+      exclude = new RegExp(excludeFilter, "i");
+    } catch {
+      exclude = null; // bozuk regex → exclude yok (fail-open; gürültü sızsa bile ICP süzer)
     }
   }
   let srcReg = "";
@@ -133,6 +143,7 @@ export function extractOrgLinks(html: string, sourceUrl: string, domainFilter?: 
     if (srcReg && (host === srcReg || host.endsWith("." + srcReg))) continue; // iç link
     if (isInfraHost(host)) continue;
     if (filter && !filter.test(host)) continue;
+    if (exclude && exclude.test(host)) continue; // per-kaynak gürültü elemesi (dernek/ajans/gov host'ları)
     if (seen.has(host)) continue;
     seen.add(host);
     const name = htmlToText(m[2] ?? "").slice(0, 200) || host;
@@ -223,12 +234,13 @@ interface SourceRow {
   name: string;
   url: string;
   domain_filter: string | null;
+  exclude_domains: string | null;
 }
 
 export const leadgenSource: Handler = async (job) => {
   const sourceId = Number((job.payload as { sourceId?: number }).sourceId);
   const s = (
-    await query<SourceRow>(`select id,name,url,domain_filter from lead_sources where id=$1 and active=true`, [sourceId])
+    await query<SourceRow>(`select id,name,url,domain_filter,exclude_domains from lead_sources where id=$1 and active=true`, [sourceId])
   ).rows[0];
   if (!s) return { costUsd: 0 };
   const { status, html } = await fetchHtml(s.url);
@@ -241,7 +253,7 @@ export const leadgenSource: Handler = async (job) => {
     await audit({ loop: "leadgen", action: "source.unchanged", target: s.name });
     return { costUsd: 0 };
   }
-  const candidates = extractOrgLinks(html, s.url, s.domain_filter).slice(0, env.SOURCE_MAX_CANDIDATES_PER_RUN);
+  const candidates = extractOrgLinks(html, s.url, s.domain_filter, s.exclude_domains).slice(0, env.SOURCE_MAX_CANDIDATES_PER_RUN);
   let added = 0;
   for (const c of candidates) {
     const ins = await query<{ id: number }>(
@@ -299,7 +311,16 @@ function normEntity(s: string): "tacir" | "kamu" | "birey" | "bilinmiyor" {
 
 export const leadgenEnrich: Handler = async (job) => {
   const companyId = Number((job.payload as { companyId?: number }).companyId);
-  const c = (await query<{ id: number; name: string; domain: string | null }>(`select id,name,domain from lead_companies where id=$1`, [companyId])).rows[0];
+  // Kaynağın segment_hint'i (varsa) prior olarak sınıflamaya beslenir. Lead 'dizin:<name>' kaynağından
+  // gelmişse ilgili lead_sources satırına join eder; manuel/hint'siz lead'de null → davranış eskisi gibi.
+  const c = (
+    await query<{ id: number; name: string; domain: string | null; segment_hint: string | null }>(
+      `select c.id, c.name, c.domain,
+              (select ls.segment_hint from lead_sources ls where 'dizin:' || ls.name = c.source limit 1) as segment_hint
+         from lead_companies c where c.id=$1`,
+      [companyId],
+    )
+  ).rows[0];
   if (!c || !c.domain) return { costUsd: 0 };
   const reqUrl = c.domain.startsWith("http") ? c.domain : `https://${c.domain}`;
   const { status, html, finalUrl: url } = await fetchHtml(reqUrl); // url: redirect sonrası GERÇEK sayfa URL'i (base + evidence_url için kullanılır)
@@ -310,13 +331,26 @@ export const leadgenEnrich: Handler = async (job) => {
   const text = htmlToText(html).slice(0, 20_000);
   // Kurumun kendi <title>'ı = otoriter isim (sourcing anchor-metni gürültülü olabilir).
   const orgName = extractTitle(html) || c.name;
+  // Kaynak ipucu (segment_hint) varsa yumuşak bir PRIOR olarak eklenir; içerik açıkça farklıysa içerik kazanır.
+  // Nihai karar yine KOD-KAPISI normSegment()'te; LLM yalnız önerir (AGENTS.md §4).
+  const prior = c.segment_hint
+    ? `\nKAYNAK İPUCU: bu lead '${c.segment_hint}' segmentli bir dizinden geldi — içerik bunu DOĞRULUYORSA bu segmenti tercih et; içerik açıkça farklıysa İÇERİĞE uy (ipucu zorlayıcı değil).`
+    : "";
   const cls = await bulkJson({
     loop: "leadgen",
     jobId: job.id,
     schema: EnrichSchema,
     system:
       "Sen Reflektif (kariyer-rehberlik/bilan SaaS) için lead nitelendiricisin. Verilen kurumun public site metninden sınıflandır. Uydurma; yalnız metne dayan.\n" +
-      "JSON: {segment, entity_type, icp_score, why_now}. segment ∈ {b2b_edu, b2b2c_ld, b2b_pro, b2c}. b2b_pro = bağımsız/serbest kariyer koçu, psikolojik danışman, terapist gibi BİREYSEL profesyonel (kurum değil; aracı bizzat kendi pratiğinde kullanan kişi). entity_type ∈ {tacir, kamu, birey, bilinmiyor}. icp_score 0-100 SAYI (Reflektif'e uygunluk). why_now = neden şimdi iyi hedef (TR, kısa).",
+      "JSON: {segment, entity_type, icp_score, why_now}. segment ∈ {b2b_edu, b2b2c_ld, b2b_pro, b2c}.\n" +
+      "SEGMENT TANIMLARI:\n" +
+      "- b2b_pro = TEK bir gerçek kişinin kendi adıyla yürüttüğü BİREYSEL profesyonel pratik: bağımsız/serbest kariyer koçu, psikolojik danışman/psikolog, terapist. Aracı bizzat kendisi kullanır; şirket/kurum DEĞİL (unvan+kişi adı ağırlıkta, 'A.Ş.'/'Ltd.'/kurumsal 'biz' anlatısı YOK).\n" +
+      "- b2b2c_ld = kurumsal İK / yetenek / L&D / danışmanlık ŞİRKETİ ya da çok-çalışanlı tüzel kişilik (Reflektif'i müşterilerine/çalışanlarına sunacak aracı kurum).\n" +
+      "- b2b_edu = üniversite/okul/eğitim kurumu (kariyer merkezi vb.).\n" +
+      "- b2c = yukarıdakilerin hiçbiri (son-kullanıcı/genel).\n" +
+      "AYIRT EDİCİ ÖRNEKLER: 'Uzm. Psikolog Ayşe X - bireysel terapi' → b2b_pro; 'X Kurumsal İK Danışmanlığı A.Ş.' → b2b2c_ld.\n" +
+      "entity_type ∈ {tacir, kamu, birey, bilinmiyor}. icp_score 0-100 SAYI (Reflektif'e uygunluk). why_now = neden şimdi iyi hedef (TR, kısa)." +
+      prior,
     user: `KURUM: ${orgName}\nURL: ${url}\n--- İÇERİK ---\n${text.slice(0, 6000)}`,
   });
   const icp = Math.max(0, Math.min(100, Math.round(cls.icp_score)));

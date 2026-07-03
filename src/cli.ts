@@ -74,6 +74,24 @@ async function smoke(): Promise<void> {
     throw new Error(`SMOKE FAILED: sourcing dedupe/infra → ${JSON.stringify(all)}`);
   }
 
+  // excludeFilter (per-kaynak gürültü elemesi) — domainFilter/infra/iç-link elemesine EK negatif filtre.
+  // Kaynağın kendi domaininden FARKLI bir 'gürültü' host'u excludeFilter ile elenmeli, gerçek host kalmalı.
+  const excludeFixture = `<html><body>
+    <a href="https://spam-ajans.com/">siteyi yapan web-ajansı (gürültü)</a>
+    <a href="https://gercekfirma.com/">gerçek üye firma</a>
+  </body></html>`;
+  const exSrc = "https://portal.dizin.com/liste";
+  const excluded = extractOrgLinks(excludeFixture, exSrc, null, "(^|\\.)spam-ajans\\.com$");
+  log.info({ excluded: excluded.map((c) => c.domain) }, "exclude filter extractor");
+  if (excluded.some((c) => c.domain.endsWith("spam-ajans.com")) || !excluded.some((c) => c.domain === "gercekfirma.com")) {
+    throw new Error(`SMOKE FAILED: excludeFilter → ${JSON.stringify(excluded)}`);
+  }
+  // Bozuk exclude regex → fail-open (yok sayılır; gerçek host yine döner, çökme yok).
+  const excludeBroken = extractOrgLinks(excludeFixture, exSrc, null, "([broken");
+  if (!excludeBroken.some((c) => c.domain === "gercekfirma.com") || !excludeBroken.some((c) => c.domain === "spam-ajans.com")) {
+    throw new Error(`SMOKE FAILED: excludeFilter fail-open → ${JSON.stringify(excludeBroken)}`);
+  }
+
   // leadgen enrich alt-sayfa keşfi — deterministik (ağsız) doğrulama.
   const contactFixture = `<html><body>
     <a href="/iletisim">İletişim</a>
