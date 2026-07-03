@@ -426,6 +426,57 @@ async function notionSync(args: string[]): Promise<void> {
   });
 }
 
+// drafts — gönderilmesi PLANLANAN içerikleri (taslak e-postalar) incele. SALT-OKUNUR; hiçbir şey göndermez.
+//   pnpm cli drafts [--limit N] [--segment b2b_edu|b2b2c_ld|b2b_pro|b2c] [--full]
+async function draftsReview(args: string[]): Promise<void> {
+  const limIdx = args.indexOf("--limit");
+  const limit = limIdx >= 0 ? Math.max(1, Number(args[limIdx + 1]) || 20) : 20;
+  const segIdx = args.indexOf("--segment");
+  const segment = segIdx >= 0 ? args[segIdx + 1] : null;
+  const full = args.includes("--full");
+
+  // Özet: kaç taslak, segment + gönderilebilirlik dağılımı (gate yalnız HESAP; gönderim yok).
+  const sum = await query<{ segment: string | null; sendable: string; c: number }>(
+    `select co.segment,
+            coalesce(om.evidence_snapshot->>'sendable','?') as sendable,
+            count(*)::int as c
+       from outreach_messages om
+       join lead_contacts lc on lc.id=om.contact_id
+       join lead_companies co on co.id=lc.company_id
+      group by 1,2 order by 3 desc`,
+  );
+  const total = sum.rows.reduce((a, r) => a + r.c, 0);
+  const sendableYes = sum.rows.filter((r) => r.sendable === "true").reduce((a, r) => a + r.c, 0);
+  console.log(`\n=== TASLAKLAR: ${total} · sendable=${sendableYes} (gönderim KAPALI — deny-by-default) ===`);
+  console.log("segment × sendable:", sum.rows.map((r) => `${r.segment ?? "?"}/${r.sendable}:${r.c}`).join("  "));
+
+  const rows = await query<{
+    company: string; segment: string | null; icp: number | null; email: string; email_status: string;
+    subject: string; body: string; sendable: string | null; gate_reason: string | null; grounded: string | null;
+  }>(
+    `select co.name as company, co.segment, co.icp_score as icp, lc.email, lc.email_status,
+            om.subject, om.body,
+            om.evidence_snapshot->>'sendable' as sendable,
+            om.evidence_snapshot->>'gate_reason' as gate_reason,
+            om.evidence_snapshot->>'grounded' as grounded
+       from outreach_messages om
+       join lead_contacts lc on lc.id=om.contact_id
+       join lead_companies co on co.id=lc.company_id
+      where ($1::text is null or co.segment=$1)
+      order by co.icp_score desc nulls last, om.id
+      limit $2`,
+    [segment, limit],
+  );
+  console.log(`\n(gösterilen: ${rows.rows.length}${segment ? ` · segment=${segment}` : ""}${full ? "" : " · özet gövde; tam metin için --full"})\n`);
+  for (const r of rows.rows) {
+    const gate = r.sendable === "true" ? "sendable" : `GÖNDERİLEMEZ (${r.gate_reason ?? "?"})`;
+    console.log(`── ${r.company}  [${r.segment ?? "?"} · ICP ${r.icp ?? "?"} · ${r.email} · ${r.email_status} · ${gate} · grounded=${r.grounded}]`);
+    console.log(`   Konu: ${r.subject}`);
+    const body = full ? r.body : r.body.replace(/\s+/g, " ").slice(0, 200) + (r.body.length > 200 ? "…" : "");
+    console.log(`   ${body.split("\n").join("\n   ")}\n`);
+  }
+}
+
 async function main(): Promise<void> {
   const [cmd, ...args] = process.argv.slice(2);
   switch (cmd) {
@@ -520,9 +571,12 @@ async function main(): Promise<void> {
     case "notion-sync":
       await notionSync(args);
       break;
+    case "drafts":
+      await draftsReview(args);
+      break;
     default:
       console.log(
-        "komutlar: migrate | tick | worker | reaper | status | smoke | add-lead <domain> [ad] | add-source <url> [filter] [ad] | list-sources | notion-sync [--dry-run] [--limit N] | pause <loop> <reason> | resume <loop>",
+        "komutlar: migrate | tick | worker | reaper | status | smoke | drafts [--limit N] [--segment X] [--full] | add-lead <domain> [ad] | add-source <url> [filter] [ad] | list-sources | notion-sync [--dry-run] [--limit N] | pause <loop> <reason> | resume <loop>",
       );
   }
 }

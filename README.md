@@ -30,6 +30,7 @@ pnpm smoke                   # uçtan-uca doğrulama (enqueue→claim→done + i
 | `pnpm smoke` | Faz 0 + sourcing-extractor uçtan-uca test |
 | `pnpm secrets:pull` | `.env` sırlarını lokal kasadan (`secret` CLI / macOS Keychain) tazeler — sır-olmayan config'e dokunmaz |
 | `pnpm notion:sync [--dry-run] [--limit N]` | Enrich edilmiş bizim-kaynaklı lead'leri Notion "Reflektif CRM"e yazar (idempotent+tahribatsız; manuel kayıtlara dokunmaz) |
+| `pnpm cli drafts [--limit N] [--segment X] [--full]` | Gönderilmesi planlanan taslakları incele (salt-okunur; gönderim YOK) |
 | `pnpm cli add-source <url> [filtre] [ad]` | lead dizini ekle (tick otonom tarar; `filtre` = host JS-regex, ör. `\.edu\.tr$`) |
 | `pnpm cli list-sources` | tanımlı dizinler + her birinden gelen lead sayısı |
 | `pnpm cli add-lead <domain> [ad]` | tek lead ekle (manuel curation) |

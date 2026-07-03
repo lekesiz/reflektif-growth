@@ -46,11 +46,15 @@ pnpm cli pause GLOBAL <sebep>     # tüm döngüleri durdur (kill-switch)
 pnpm cli resume GLOBAL            # devam
 pnpm smoke                        # echo + kill-switch duman testi
 pnpm secrets:pull                 # .env sırlarını lokal kasadan (secret CLI / Keychain) tazele
+pnpm cli drafts [--limit N] [--segment X] [--full]   # gönderilmesi planlanan taslakları İNCELE (salt-okunur, gönderim YOK)
+pnpm cli notion-sync [--dry-run] [--limit N]         # lead'leri Notion "Reflektif CRM"e senkronla
 pnpm check                        # tsc --noEmit
 ```
 launchd kontrol: `launchctl list | grep reflektif` · durdur: `launchctl unload ~/Library/LaunchAgents/com.mikail.reflektif-growth.tick.plist`
 
 ## SIRADA: Faz 2 (çok-kanal gönderim) — dış-TODO bekliyor
+> **GÖNDERİM (send) DURUMU (2026-07-03 founder kararı):** Tüm girdiler (DNS/Telegram/Notion/email-verify) hazır AMA **send kodu bilinçli YAZILMADI** — founder bu etapta **gönderim İSTEMİYOR**; yalnız veri toplama + gönderilmesi planlanan taslakları izlemek/kontrol etmek istiyor (`pnpm cli drafts`). Send'e geçilince: From `@reflektif.info` (Resend'de verified, ama o domainde POSTA KUTUSU YOK) → **Reply-To = mikail@reflektif.net** (founder'ın gerçek kutusu) ZORUNLU. Send kodu yazıldığında varsayılan KAPALI + her-taslak-insan-onayı + suppression + cap + bounce/complaint circuit-breaker + warmup + List-Unsubscribe ile, yalnız açık "gönder" ile aktive.
+
 Bunlar **dışarıdan (founder) sağlanacak** girdilerdir; gelmeden Faz 2 kodu aktive edilmez:
 - [x] `reflektif.info` DNS: SPF + DKIM + DMARC → ✅ Resend API ile doğrulandı (2026-07-02): domain `verified`, `eu-west-1`, TXT `resend._domainkey` + MX `send` + TXT `send` hepsi `verified`. `RESEND_API_KEY` + `SENDING_DOMAIN` lokal `.env`'e eklendi (gitignore'lu, commit'lenmedi), `env.ts`'e opsiyonel alan olarak tanımlandı — **henüz hiçbir kod okumuyor/göndermiyor** (RED tier, guardrail'li Faz 2 kodu yazılana kadar). Warmup planı hâlâ açık iş.
 - [x] Telegram bot token + chat_id → ✅ canlı (2026-07-02): `@reflekti_growth_info_bot`, `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` lokal `.env`'e eklendi (kod zaten hazırdı, `src/notify/telegram.ts` — değişiklik gerekmedi). Test mesajı gönderildi ve doğrulandı. Bundan sonra `compintel:digest` (haftalık) + gelecekteki alarmlar buraya düşer.
