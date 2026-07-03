@@ -20,6 +20,9 @@ const Env = z.object({
   OLLAMA_BULK_MODEL: z.string().default("qwen3:30b"),
   OLLAMA_WRITER_MODEL: z.string().default("qwen3:30b"),
   OLLAMA_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
+  // ollamaJson() bir çağrıyı en fazla kaç kez dener (timeout / JSON-parse / zod-şema hatasında repair-reprompt ile tekrar).
+  // 1 = retry yok = eski davranış (tek deneme). Her deneme KENDİ timeout'unu alır; retry'ler arası backoff YOK (lokal Ollama).
+  OLLAMA_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(3),
   GOOGLE_CLOUD_PROJECT: z.string().optional(),
   GOOGLE_CLOUD_LOCATION: z.string().default("europe-west4"),
   GOOGLE_SERVICE_ACCOUNT_JSON: z.string().optional(),

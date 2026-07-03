@@ -5,6 +5,8 @@ import { enqueue, reapExpired } from "./core/queue";
 import { pause, resume } from "./core/switches";
 import { query, pool } from "./db/pool";
 import { extractOrgLinks, discoverContactPaths, normSegment } from "./loops/leadgen";
+import { runJsonWithRepair } from "./llm/ollama";
+import { z } from "zod";
 import { childLogger } from "./core/logger";
 
 const log = childLogger("cli");
@@ -109,6 +111,62 @@ async function smoke(): Promise<void> {
     if (got !== expected) {
       throw new Error(`SMOKE FAILED: normSegment(${JSON.stringify(input)}) → ${got}, beklenen ${expected}`);
     }
+  }
+
+  // ollamaJson retry/repair sürücüsü — ağsız (fake generate) deterministik doğrulama.
+  // Canlıda çözülen bug: qwen3 bazen eksik-alan / bozuk JSON üretiyor → zod.parse patlıyor → job 'dead'.
+  // Not: gerçek Ollama entegrasyonu (fetch + timeout) canlı Verify fazında test edilecek; burada yalnız
+  // saf döngü mantığı (parse-fail + zod-fail retry, repair reprompt, tükeninve throw, maxAttempts=1 = no-retry).
+  const RepairSchema = z.object({ subject: z.string().min(3), body: z.string().min(10) });
+
+  // (A) 1. deneme: JSON-DIŞI çöp (parse hatası) → 2. deneme: eksik 'body' (zod hatası) → 3. deneme: geçerli.
+  let calls = 0;
+  const suffixes: string[] = [];
+  const repaired = await runJsonWithRepair({
+    schema: RepairSchema,
+    maxAttempts: 3,
+    generate: async ({ repairSuffix }) => {
+      calls++;
+      suffixes.push(repairSuffix);
+      if (calls === 1) return "üzgünüm, işte cevabın: (geçersiz)";
+      if (calls === 2) return `{"subject":"Merhaba Reflektif"}`;
+      return `<think>gövdeyi de ekleyeyim</think>{"subject":"Merhaba Reflektif","body":"Bu yeterince uzun bir taslak gövdesidir."}`;
+    },
+  });
+  if (calls !== 3 || repaired.body.length < 10) {
+    throw new Error(`SMOKE FAILED: repair sürücüsü → calls=${calls}, out=${JSON.stringify(repaired)}`);
+  }
+  // İlk deneme repair'siz (""), sonraki denemeler eksik alan adını + [DÜZELTME] talimatını içermeli.
+  if (suffixes[0] !== "" || !suffixes[2]?.includes("body") || !suffixes[2]?.includes("[DÜZELTME]")) {
+    throw new Error(`SMOKE FAILED: repair reprompt yapısı → ${JSON.stringify(suffixes)}`);
+  }
+
+  // (B) tüm denemeler başarısız → THROW (sessiz boş/uydurma değer DÖNMEZ).
+  let threw = false;
+  try {
+    await runJsonWithRepair({ schema: RepairSchema, maxAttempts: 2, generate: async () => `{}` });
+  } catch {
+    threw = true;
+  }
+  if (!threw) throw new Error("SMOKE FAILED: tükenen retry throw etmedi");
+
+  // (C) maxAttempts=1 → retry YOK (eski davranış): başarısız generate tam 1 kez çağrılıp throw eder.
+  let onceCalls = 0;
+  let threwOnce = false;
+  try {
+    await runJsonWithRepair({
+      schema: RepairSchema,
+      maxAttempts: 1,
+      generate: async () => {
+        onceCalls++;
+        return `{}`;
+      },
+    });
+  } catch {
+    threwOnce = true;
+  }
+  if (onceCalls !== 1 || !threwOnce) {
+    throw new Error(`SMOKE FAILED: maxAttempts=1 no-retry → calls=${onceCalls}, threw=${threwOnce}`);
   }
 
   console.log("SMOKE_PASS");
