@@ -5,6 +5,7 @@ import { enqueue, reapExpired } from "./core/queue";
 import { pause, resume } from "./core/switches";
 import { query, pool, withClient } from "./db/pool";
 import { extractOrgLinks, discoverContactPaths, normSegment } from "./loops/leadgen";
+import { mapResult, type EmailStatus } from "./verify/emailVerify";
 import { runJsonWithRepair } from "./llm/repair";
 import { audit } from "./core/audit";
 import {
@@ -252,6 +253,25 @@ async function smoke(): Promise<void> {
   ]) {
     if (websiteHost(v) !== "kocholding.com.tr") {
       throw new Error(`SMOKE FAILED: notion websiteHost dedup normalize → ${v} → ${websiteHost(v)}`);
+    }
+  }
+
+  // email-verify EŞLEME (saf fonksiyon, AĞSIZ) — MillionVerifier result → lead_contacts.email_status haritası.
+  // Canlı MillionVerifier çağrısı burada YOK (kredi harcamaz); yalnız deterministik eşleme kapısı doğrulanır.
+  // catch_all→risky KASITLI: var olduğu kanıtlanamayan kutu 'valid' OLMAZ (deny-by-default'ı korur).
+  const verifyMap: Array<[string, EmailStatus]> = [
+    ["ok", "valid"],
+    ["catch_all", "risky"],
+    ["invalid", "invalid"],
+    ["disposable", "invalid"],
+    ["unknown", "unknown"],
+    ["error", "unknown"], // hata/tanınmayan değer → 'unknown'
+    ["", "unknown"], // boş/eksik result → 'unknown'
+  ];
+  for (const [input, expected] of verifyMap) {
+    const got = mapResult(input);
+    if (got !== expected) {
+      throw new Error(`SMOKE FAILED: mapResult(${JSON.stringify(input)}) → ${got}, beklenen ${expected}`);
     }
   }
 

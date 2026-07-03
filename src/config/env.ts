@@ -59,6 +59,14 @@ const Env = z.object({
   SOURCE_MAX_CANDIDATES_PER_RUN: z.coerce.number().int().positive().default(40),
   // enrich: ana sayfadan keşfedilen iletişim/kariyer alt-sayfalarından en fazla kaç tanesi taranır (tek-hop).
   LEADGEN_MAX_CONTACT_PAGES: z.coerce.number().int().positive().default(3),
+
+  // --- Email doğrulama (MillionVerifier) — GÖNDERİM DEĞİL; yalnız lead_contacts.email_status'u set eder (Green tier) ---
+  // Anahtar KODA yazılmaz — kasada + lokal .env'de (gitignore'lu). Yoksa verifyEmail graceful 'unknown' döner.
+  EMAIL_VERIFY_API_KEY: z.string().optional(),
+  EMAIL_VERIFY_PROVIDER: z.string().default("millionverifier"),
+  EMAIL_VERIFY_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
+  // Kalan kredi bunun ALTINA düşünce API'yi bir daha çağırma → 'unknown' (kredi tükenmesini önle).
+  EMAIL_VERIFY_MIN_CREDITS: z.coerce.number().int().nonnegative().default(25),
 });
 
 export const env = Env.parse(process.env);

@@ -9,6 +9,7 @@ import { markIfChanged } from "../core/seen";
 import { fetchRaw } from "../core/http";
 import { bulkJson, writerJson } from "../llm/index";
 import { childLogger } from "../core/logger";
+import { verifyEmail } from "../verify/emailVerify";
 
 const log = childLogger("leadgen");
 
@@ -415,21 +416,29 @@ export const leadgenEnrich: Handler = async (job) => {
   return { costUsd: 0 };
 };
 
-// ----- leadgen:verify (email-verify API; key yoksa graceful 'unknown') -----
+// ----- leadgen:verify (MillionVerifier email-verify; key yoksa/hata/timeout graceful 'unknown') -----
 export const leadgenVerify: Handler = async (job) => {
   const contactId = Number((job.payload as { contactId?: number }).contactId);
   const c = (await query<{ email: string; status: string }>(`select email,status from lead_contacts where id=$1`, [contactId])).rows[0];
   if (!c) return { costUsd: 0 };
-  // TODO(dış-TODO): EMAIL_VERIFY_API_KEY gelince gerçek doğrulama (MillionVerifier/ZeroBounce).
-  // Şimdilik: doğrulanamadı → 'unknown' (deny-by-default kapısı bunu send'e geçirmez).
-  const emailStatus = "unknown";
+  // Geçiş kapısını ÜCRETLİ verifyEmail'DEN ÖNCE çalıştır ve reddedilirse SHORT-CIRCUIT et: contact zaten ileri
+  // (verified/drafted/…) ya da terminal (suppressed/dead) durumdaysa hiçbir şey yapmadan tamamla. Aksi halde bir
+  // retry (UPDATE sonrası enqueue'nun transient hatası → fail→reschedule; veya reap edilmiş 'running' job)
+  // verifyEmail'i TEKRAR çağırıp fazladan MillionVerifier kredisi harcar ve status'ü geriye ('drafted'→'verified')
+  // sarabilir. Yalnız 'new' → 'verified' meşru olduğundan normal akış (status='new') sorunsuz ilerler.
   try {
     assertLeadTransition(c.status, "verified");
   } catch {
-    /* zaten ileri durumda */
+    log.info({ from: c.status }, "verify atlandı: contact zaten ileri/terminal durumda");
+    return { costUsd: 0 };
   }
+  // Gerçek doğrulama (MillionVerifier v3). verifyEmail ASLA throw etmez → anahtar-yok/hata/timeout/kredi-düşük
+  // hepsi graceful 'unknown' döner (verify job güvenli). email_status yalnız SET edilir; deny-by-default gönderim
+  // kapısı (canSend) 'valid' olmayan hiçbir contact'ı send'e geçirmez — GÖNDERİM YOK. catch_all → risky.
+  const { status: emailStatus } = await verifyEmail(c.email);
   await query(`update lead_contacts set email_status=$2, status='verified' where id=$1`, [contactId, emailStatus]);
   await enqueue({ loop: "leadgen", kind: "leadgen:draft", payload: { contactId }, dedupeKey: `draft:${c.email}` });
+  log.info({ emailStatus }, "verify tamam"); // PII yok: e-posta loglanmaz, yalnız durum
   return { costUsd: 0 };
 };
 
