@@ -28,6 +28,7 @@ pnpm smoke                   # uçtan-uca doğrulama (enqueue→claim→done + i
 | `pnpm tick` | launchd entrypoint: reaper + GLOBAL-kontrol + worker turları |
 | `pnpm status` | switches + job sayıları + günlük maliyet + son audit |
 | `pnpm smoke` | Faz 0 + sourcing-extractor uçtan-uca test |
+| `pnpm secrets:pull` | `.env` sırlarını lokal kasadan (`secret` CLI / macOS Keychain) tazeler — sır-olmayan config'e dokunmaz |
 | `pnpm cli add-source <url> [filtre] [ad]` | lead dizini ekle (tick otonom tarar; `filtre` = host JS-regex, ör. `\.edu\.tr$`) |
 | `pnpm cli list-sources` | tanımlı dizinler + her birinden gelen lead sayısı |
 | `pnpm cli add-lead <domain> [ad]` | tek lead ekle (manuel curation) |
@@ -39,5 +40,6 @@ pnpm smoke                   # uçtan-uca doğrulama (enqueue→claim→done + i
 - **Tam otonom + guardrail:** kill-switch (`agent_switches`) · günlük cost-cap (`agent_cost_ledger`) · append-only audit · staleness/backoff · deny-by-default gönderim (Faz 2).
 - **Halüsinasyon:** LLM önerir, **KOD karar verir**; her finding `evidence_url` zorunlu; structured-output (zod).
 - **Hafıza:** durum context'te değil **DB'de**; idempotency (`dedupe_key`), `seen_registry`, restart-safe.
+- **Sırlar:** tek kaynak lokal kasa (macOS Keychain, `~/.local/bin/secret`); `.env` türetilmiş artefakt (gitignore'lu, `pnpm secrets:pull` ile yeniden üretilir). Anahtar adı = env değişkeni adı. launchd `.env` okur (headless Keychain erişemez).
 
 Detay ve tier modeli: [AGENTS.md](./AGENTS.md).

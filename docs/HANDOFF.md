@@ -44,6 +44,7 @@ pnpm cli add-lead <domain> [ad]   # tek lead ekle (manuel curation; sourcing art
 pnpm cli pause GLOBAL <sebep>     # tüm döngüleri durdur (kill-switch)
 pnpm cli resume GLOBAL            # devam
 pnpm smoke                        # echo + kill-switch duman testi
+pnpm secrets:pull                 # .env sırlarını lokal kasadan (secret CLI / Keychain) tazele
 pnpm check                        # tsc --noEmit
 ```
 launchd kontrol: `launchctl list | grep reflektif` · durdur: `launchctl unload ~/Library/LaunchAgents/com.mikail.reflektif-growth.tick.plist`
@@ -63,7 +64,7 @@ Bunlar **dışarıdan (founder) sağlanacak** girdilerdir; gelmeden Faz 2 kodu a
 2. **Ürüne dokunma.** reflektif-fresh DB/repo/secret'ına asla yazma.
 3. **LLM önerir, kod karar verir.** evidence_url zorunlu, şemalı (zod) çıktı, gönderim deny-by-default.
 4. **Hukuk esnek** (founder kararı: gate değil) ama opt-out/suppression hijyen olarak kalır.
-5. **Sırlar** loglara/PR'lara/chat'e asla yazılmaz; CLI ile pipe edilir.
+5. **Sırlar** loglara/PR'lara/chat'e asla yazılmaz; CLI ile pipe edilir. **Tek kaynak: lokal kasa** (macOS Keychain, `~/.local/bin/secret` — `secret get NAME` / `secret run NAME... -- cmd`). `.env` kasadan türetilir (`pnpm secrets:pull`, gitignore'lu). Anahtar adı = env değişkeni adı (RESEND_API_KEY, ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID kasada). launchd `.env` okur (headless Keychain'e erişemez). Araç adversarial güvenlik review'ından geçti; `secret` CLI + `~/CLAUDE.md` Secrets bölümü repo DIŞINDA (yalnız yerel).
 
 ## Bu oturumda (bireysel) yapılanların özeti
 Faz 0+1a+1b sıfırdan kuruldu, 3 commit push edildi, launchd ile canlıya alındı. Bu belge devir için eklendi.
