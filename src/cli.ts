@@ -3,9 +3,21 @@ import { tick } from "./tick";
 import { runWorkerTurn } from "./core/worker";
 import { enqueue, reapExpired } from "./core/queue";
 import { pause, resume } from "./core/switches";
-import { query, pool } from "./db/pool";
+import { query, pool, withClient } from "./db/pool";
 import { extractOrgLinks, discoverContactPaths, normSegment } from "./loops/leadgen";
 import { runJsonWithRepair } from "./llm/repair";
+import { audit } from "./core/audit";
+import {
+  notionConfigured,
+  notionUpsertLead,
+  mapKategori,
+  mapOncelik,
+  mapDurum,
+  buildNotlar,
+  websiteUrl,
+  websiteHost,
+  type NotionLead,
+} from "./notify/notion";
 import { z } from "zod";
 import { childLogger } from "./core/logger";
 
@@ -202,7 +214,196 @@ async function smoke(): Promise<void> {
     throw new Error(`SMOKE FAILED: markdown-fenced JSON kurtarılamadı → calls=${fenceCalls}, out=${JSON.stringify(fenced)}`);
   }
 
+  // notion CRM eşleme (saf, ağsız) — select'e OLMAYAN değer üretmemeli; öncelik/durum eşiği + notlar formatı.
+  // Canlı Notion çağrısı burada YOK (Verify fazında). Yalnız deterministik eşleme kapısı doğrulanır.
+  if (mapKategori("itu.edu.tr", "b2b2c_ld") !== "Üniversite") throw new Error("SMOKE FAILED: notion kategori .edu.tr → Üniversite (domain segment'ten önce)");
+  if (mapKategori("ozelokul.k12.tr", null) !== "Okul") throw new Error("SMOKE FAILED: notion kategori .k12.tr → Okul");
+  if (mapKategori("kariyerkocu.com", "b2b_pro") !== "Koçluk") throw new Error("SMOKE FAILED: notion kategori b2b_pro → Koçluk");
+  if (mapKategori("ikyazilim.com", "b2b2c_ld") !== "İK Yazılım") throw new Error("SMOKE FAILED: notion kategori b2b2c_ld → İK Yazılım");
+  if (mapKategori("egitim.com", "b2b_edu") !== "Üniversite") throw new Error("SMOKE FAILED: notion kategori b2b_edu(diğer) → Üniversite");
+  if (mapKategori("genel.com", "b2c") !== null) throw new Error("SMOKE FAILED: notion kategori b2c → BOŞ olmalı (yanlış option üretme)");
+  if (mapKategori("bilinmeyen.com", null) !== null) throw new Error("SMOKE FAILED: notion kategori bilinmeyen → BOŞ olmalı");
+  if (
+    mapOncelik(90) !== "P0" || mapOncelik(85) !== "P0" || mapOncelik(84) !== "P1" || mapOncelik(75) !== "P1" ||
+    mapOncelik(74) !== "P2" || mapOncelik(60) !== "P2" || mapOncelik(59) !== "P3" || mapOncelik(0) !== "P3"
+  ) {
+    throw new Error("SMOKE FAILED: notion öncelik eşiği (85→P0, 75→P1, 60→P2, <60→P3)");
+  }
+  if (mapDurum(true) !== "Hazırlanıyor" || mapDurum(false) !== "Araştırılacak") {
+    throw new Error("SMOKE FAILED: notion durum (draft→Hazırlanıyor / yoksa→Araştırılacak)");
+  }
+  const notlar = buildNotlar({
+    companyName: "X", domain: "x.com", segment: null, icpScore: 70,
+    whyNow: "neden şimdi", evidenceUrl: "https://x.com/kaynak", email: null, draftSubject: "Kısa demo?",
+  });
+  if (notlar !== "neden şimdi\nKaynak: https://x.com/kaynak\nTaslak: Kısa demo?") {
+    throw new Error(`SMOKE FAILED: notion notlar formatı → ${JSON.stringify(notlar)}`);
+  }
+  if (websiteUrl("www.itu.edu.tr/") !== "https://itu.edu.tr") {
+    throw new Error(`SMOKE FAILED: notion websiteUrl normalize → ${websiteUrl("www.itu.edu.tr/")}`);
+  }
+  // dedup kanonikleştirme: www/http/trailing-slash/path/case varyantları AYNI host'a inmeli (duplicate önleme)
+  for (const v of [
+    "kocholding.com.tr",
+    "https://www.kocholding.com.tr/",
+    "http://kocholding.com.tr",
+    "https://KocHolding.com.tr/iletisim?x=1",
+    "www.KOCHOLDING.com.tr",
+  ]) {
+    if (websiteHost(v) !== "kocholding.com.tr") {
+      throw new Error(`SMOKE FAILED: notion websiteHost dedup normalize → ${v} → ${websiteHost(v)}`);
+    }
+  }
+
   console.log("SMOKE_PASS");
+}
+
+// ----- notion-sync: enrich edilmiş bizim-kaynaklı lead'leri 'Reflektif CRM'e yaz (İDEMPOTENT + TAHRİBATSIZ) -----
+// Kapsam: source LIKE 'dizin:%' AND icp_score IS NOT NULL AND notion_page_id IS NULL (henüz sync edilmemiş).
+// --dry-run: hiçbir şey yazmaz, ne yapılacağını (kaç lead + örnek eşleme) gösterir. --limit N: en fazla N lead.
+// GÜVENLİK: bu BİZİM CRM'imize yazma — lead'lere gönderim DEĞİL. Mevcut manuel sayfalar ASLA ezilmez.
+async function notionSync(args: string[]): Promise<void> {
+  const dryRun = args.includes("--dry-run");
+  let limit = 50; // rate-limit dostu varsayılan batch; --limit ile artırılabilir
+  const li = args.findIndex((a) => a === "--limit" || a.startsWith("--limit="));
+  if (li >= 0) {
+    const flag = args[li] ?? "";
+    const raw = flag.includes("=") ? flag.split("=")[1] : args[li + 1];
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) limit = Math.floor(n);
+  }
+
+  if (!dryRun && !notionConfigured()) {
+    console.log("notion-sync: NOTION_TOKEN yok (kasadan çek: pnpm secrets:pull). Token'sız önizleme için --dry-run kullan.");
+    return;
+  }
+
+  const WHERE = `c.source like 'dizin:%' and c.icp_score is not null and c.domain is not null and c.notion_page_id is null`;
+  type LeadRow = {
+    id: number;
+    name: string;
+    domain: string;
+    segment: string | null;
+    icp_score: number | null;
+    why_now: string | null;
+    evidence_url: string | null;
+    email: string | null;
+    draft_subject: string | null;
+  };
+
+  const fetchTotal = async (): Promise<number> =>
+    (await query<{ c: number }>(`select count(*)::int as c from lead_companies c where ${WHERE}`)).rows[0]?.c ?? 0;
+
+  const fetchRows = async (): Promise<LeadRow[]> =>
+    (
+      await query<LeadRow>(
+        `select c.id, c.name, c.domain, c.segment, c.icp_score,
+                c.signals->>'why_now' as why_now, c.evidence_url,
+                (select lc.email from lead_contacts lc
+                   where lc.company_id = c.id and lc.is_generic_corporate = true and lc.email is not null
+                   order by lc.id limit 1) as email,
+                (select om.subject from outreach_messages om
+                   join lead_contacts lc2 on lc2.id = om.contact_id
+                   where lc2.company_id = c.id and om.status = 'draft_for_review'
+                   order by om.id limit 1) as draft_subject
+           from lead_companies c
+          where ${WHERE}
+          order by c.icp_score desc, c.id
+          limit $1`,
+        [limit],
+      )
+    ).rows;
+
+  const toLead = (r: LeadRow): NotionLead => ({
+    companyName: r.name,
+    domain: r.domain,
+    segment: r.segment,
+    icpScore: r.icp_score,
+    whyNow: r.why_now,
+    evidenceUrl: r.evidence_url,
+    email: r.email,
+    draftSubject: r.draft_subject,
+  });
+
+  if (dryRun) {
+    const total = await fetchTotal();
+    const rows = await fetchRows();
+    const sample = rows.slice(0, 10).map((r) => ({
+      kurum: r.name?.slice(0, 40),
+      website: websiteUrl(r.domain),
+      kategori: mapKategori(r.domain, r.segment) ?? "(boş)",
+      öncelik: mapOncelik(r.icp_score),
+      durum: mapDurum(Boolean(r.draft_subject)),
+      email: r.email ?? "(boş)",
+    }));
+    log.info({ total, willProcess: rows.length, limit }, "notion-sync DRY-RUN — hiçbir şey yazılmadı");
+    console.log(`notion-sync DRY-RUN — eşleşen: ${total}, işlenecek (limit ${limit}): ${rows.length}`);
+    if (sample.length) console.table(sample);
+    return;
+  }
+
+  // EŞ-ZAMANLILIK KORUMASI: notionUpsertLead check-then-create'tir (atomik değil). İki çakışan
+  // `notion:sync` çalışması aynı satırları (notion_page_id IS NULL) görüp aynı anda create ederse
+  // duplicate üretir. Session-level advisory lock ile çalışmaları serileştir; kilidi alamayan ATLAR.
+  // Kilit, adanmış tek bir bağlantıda tutulur ve finally'de açıkça bırakılır (havuza dönmeden önce).
+  const LOCK_KEY = 0x4e53594e; // "NSYN" — notion-sync tekil-çalışma kilidi (keyfi sabit)
+  await withClient(async (c) => {
+    const got = (await c.query<{ locked: boolean }>(`select pg_try_advisory_lock($1) as locked`, [LOCK_KEY])).rows[0]?.locked;
+    if (!got) {
+      log.warn("notion-sync: başka bir çalışma advisory lock tutuyor — ATLANDI (duplicate önlendi)");
+      console.log("notion-sync: başka bir çalışma sürüyor (kilit) — atlandı");
+      return;
+    }
+    try {
+      const total = await fetchTotal();
+      const rows = await fetchRows();
+      let created = 0;
+      let skipped = 0;
+      let failed = 0;
+      for (const r of rows) {
+        try {
+          const res = await notionUpsertLead(toLead(r));
+          // Oluşturulan VEYA bulunan mevcut sayfayı işaretle → tekrar-sync'te duplicate ÜRETME.
+          await query(`update lead_companies set notion_page_id=$2 where id=$1`, [r.id, res.pageId]);
+          if (res.created) {
+            created++;
+            await audit({
+              loop: "leadgen",
+              action: "notion.synced",
+              target: r.domain,
+              decision: "auto",
+              riskTier: "green",
+              detail: {
+                pageId: res.pageId,
+                kategori: mapKategori(r.domain, r.segment),
+                öncelik: mapOncelik(r.icp_score),
+                durum: mapDurum(Boolean(r.draft_subject)),
+              },
+            });
+          } else {
+            skipped++;
+            await audit({
+              loop: "leadgen",
+              action: "notion.skipped_existing",
+              target: r.domain,
+              decision: "blocked",
+              riskTier: "green",
+              detail: { pageId: res.pageId, reason: "mevcut sayfa (manuel olabilir) — DOKUNULMADI" },
+            });
+          }
+        } catch (e) {
+          failed++;
+          const err = e instanceof Error ? e.message : String(e);
+          await audit({ loop: "leadgen", action: "notion.sync_failed", target: r.domain, decision: "blocked", riskTier: "green", detail: { err } });
+          log.warn({ domain: r.domain, err }, "notion-sync lead hatası (atlandı)");
+        }
+      }
+      log.info({ created, skipped, failed, of: rows.length, matching: total }, "notion-sync tamam");
+      console.log(`notion-sync: created=${created} skipped(existing)=${skipped} failed=${failed} (of ${rows.length}, matching ${total})`);
+    } finally {
+      await c.query(`select pg_advisory_unlock($1)`, [LOCK_KEY]);
+    }
+  });
 }
 
 async function main(): Promise<void> {
@@ -296,9 +497,12 @@ async function main(): Promise<void> {
     case "smoke":
       await smoke();
       break;
+    case "notion-sync":
+      await notionSync(args);
+      break;
     default:
       console.log(
-        "komutlar: migrate | tick | worker | reaper | status | smoke | add-lead <domain> [ad] | add-source <url> [filter] [ad] | list-sources | pause <loop> <reason> | resume <loop>",
+        "komutlar: migrate | tick | worker | reaper | status | smoke | add-lead <domain> [ad] | add-source <url> [filter] [ad] | list-sources | notion-sync [--dry-run] [--limit N] | pause <loop> <reason> | resume <loop>",
       );
   }
 }

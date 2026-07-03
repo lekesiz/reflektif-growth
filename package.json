@@ -18,6 +18,7 @@
     "pause": "tsx src/cli.ts pause",
     "resume": "tsx src/cli.ts resume",
     "smoke": "tsx src/cli.ts smoke",
+    "notion:sync": "tsx src/cli.ts notion-sync",
     "secrets:pull": "bash scripts/secrets-pull.sh",
     "check": "tsc --noEmit"
   },

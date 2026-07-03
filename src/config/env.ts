@@ -43,6 +43,9 @@ const Env = z.object({
   TELEGRAM_BOT_TOKEN: z.string().optional(),
   TELEGRAM_CHAT_ID: z.string().optional(),
   NOTION_TOKEN: z.string().optional(),
+  // 'Reflektif CRM' Notion database id — sır DEĞİL (yalnız bir DB kimliği). Boş bırakılırsa notion.ts
+  // kod-varsayılanını kullanır. notion-sync bu database'e enrich lead'leri yazar (lead'lere gönderim DEĞİL).
+  NOTION_CRM_DATABASE_ID: z.string().default("37d27813-a60a-818a-8d4a-d737518cd5c5"),
 
   // --- Faz 2 (çok-kanal gönderim) — hazır ama RED tier: kod aktive edilene kadar okunmaz ---
   SENDING_DOMAIN: z.string().optional(),

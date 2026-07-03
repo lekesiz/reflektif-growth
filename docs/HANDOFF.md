@@ -54,10 +54,11 @@ launchd kontrol: `launchctl list | grep reflektif` · durdur: `launchctl unload 
 Bunlar **dışarıdan (founder) sağlanacak** girdilerdir; gelmeden Faz 2 kodu aktive edilmez:
 - [x] `reflektif.info` DNS: SPF + DKIM + DMARC → ✅ Resend API ile doğrulandı (2026-07-02): domain `verified`, `eu-west-1`, TXT `resend._domainkey` + MX `send` + TXT `send` hepsi `verified`. `RESEND_API_KEY` + `SENDING_DOMAIN` lokal `.env`'e eklendi (gitignore'lu, commit'lenmedi), `env.ts`'e opsiyonel alan olarak tanımlandı — **henüz hiçbir kod okumuyor/göndermiyor** (RED tier, guardrail'li Faz 2 kodu yazılana kadar). Warmup planı hâlâ açık iş.
 - [x] Telegram bot token + chat_id → ✅ canlı (2026-07-02): `@reflekti_growth_info_bot`, `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` lokal `.env`'e eklendi (kod zaten hazırdı, `src/notify/telegram.ts` — değişiklik gerekmedi). Test mesajı gönderildi ve doğrulandı. Bundan sonra `compintel:digest` (haftalık) + gelecekteki alarmlar buraya düşer.
-- [ ] Notion token + DB (CRM)
-- [ ] Email-verify API key (MillionVerifier / ZeroBounce) — `leadgen:verify` şu an graceful `unknown` dönüyor
-- [ ] GCP Vertex-EU proje + service-account (writer'ı Ollama fallback'ten Gemini'ye taşımak için)
-- [ ] WhatsApp Business API + LinkedIn yöntem kararı
+- [x] Notion token + DB (CRM) → ✅ canlı (2026-07-03): "reflektif" bot integration, "Reflektif CRM" db (`37d27813-…cd5c5`) paylaşılmış. `NOTION_TOKEN` kasada; `src/notify/notion.ts` + `pnpm notion:sync [--dry-run] [--limit N]` — enrich edilmiş **bizim-kaynaklı** lead'leri CRM'e yazar. **İdempotent + tahribatsız** (Website kanonik-host eşleştirme + `notion_page_id` işaretleme + advisory-lock; manuel kayıtlara DOKUNMAZ). 3 kayıtla canlı test edildi. Bu OUTREACH DEĞİL — kendi CRM'imize yazma. Tam sync: `pnpm notion:sync` (kalan ~230 lead).
+- [ ] **Email-verify API key (MillionVerifier / ZeroBounce) — TEK KALAN GÖNDERİM-KAPISI.** `leadgen:verify` şu an graceful `unknown` dönüyor → hiçbir taslak `sendable` olamıyor. Bu gelmeden Faz 2 send yazılmaz.
+- [ ] GCP Vertex-EU proje + service-account (opsiyonel — writer artık Claude Haiku 4.5; Vertex ikinci fallback olarak kalır).
+- WhatsApp → ⏸️ **ertelendi** (founder kararı 2026-07-03); şimdilik bildirim kanalı = Telegram, outreach = e-posta.
+- LinkedIn → ❌ **kapsam-dışı** (founder+öneri 2026-07-03): ToS/ban riski nedeniyle otomasyon YOK. İleride istenirse yalnız "taslak hazırla, insan elle gönder" modu (draft_for_review felsefesiyle uyumlu).
 - [x] ~~Lead sourcing otomasyonu~~ → ✅ YAPILDI (generic dizin-scraping + `domain_filter`). Genişletme (founder): `add-source` ile daha çok TR dizin ekle. Not: YÖK/MEB sayfaları JS-render/statik-değil → `leadgen:source` yalnız statik-HTML link listelerini çeker; JS-render dizinler için ayrı bir renderer (Faz 2+) gerekir.
 
 ## Değişmez ilkeler (yeni oturum bunlara uy)

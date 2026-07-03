@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # Kasada bu adlarla saklanan sırlar (= .env değişken adları). Yeni sır eklersen buraya da ekle.
-SECRET_KEYS=(RESEND_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID ANTHROPIC_API_KEY)
+SECRET_KEYS=(RESEND_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID ANTHROPIC_API_KEY NOTION_TOKEN)
 
 cd "$(dirname "$0")/.."          # repo kökü
 ENV_FILE=".env"
