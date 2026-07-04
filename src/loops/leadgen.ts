@@ -310,6 +310,17 @@ function normEntity(s: string): "tacir" | "kamu" | "birey" | "bilinmiyor" {
   return "bilinmiyor";
 }
 
+// ENTITY-GUARD (deterministik kod-kapısı): b2b_pro = SADECE tek gerçek kişinin kendi adıyla yürüttüğü
+// BİREYSEL pratik → yalnız entity_type='birey' ise geçerli. Bir tacir/kamu/bilinmiyor ASLA b2b_pro OLAMAZ
+// (sanayi/teknopark firmaları yanlışlıkla b2b_pro sınıflanıyordu; yumuşak segment_hint prior'ı bunu
+// düzeltmiyordu). Böyle çelişkili durumda kurumsal segment b2b2c_ld'ye düşürülür. edu/ld/b2c dokunulmaz.
+export function resolveSegment(rawSegment: string, rawEntity: string): "b2b_edu" | "b2b2c_ld" | "b2b_pro" | "b2c" {
+  const segment = normSegment(rawSegment);
+  const entity = normEntity(rawEntity);
+  if (segment === "b2b_pro" && entity !== "birey") return "b2b2c_ld";
+  return segment;
+}
+
 export const leadgenEnrich: Handler = async (job) => {
   const companyId = Number((job.payload as { companyId?: number }).companyId);
   // Kaynağın segment_hint'i (varsa) prior olarak sınıflamaya beslenir. Lead 'dizin:<name>' kaynağından
@@ -345,17 +356,18 @@ export const leadgenEnrich: Handler = async (job) => {
       "Sen Reflektif (kariyer-rehberlik/bilan SaaS) için lead nitelendiricisin. Verilen kurumun public site metninden sınıflandır. Uydurma; yalnız metne dayan.\n" +
       "JSON: {segment, entity_type, icp_score, why_now}. segment ∈ {b2b_edu, b2b2c_ld, b2b_pro, b2c}.\n" +
       "SEGMENT TANIMLARI:\n" +
-      "- b2b_pro = TEK bir gerçek kişinin kendi adıyla yürüttüğü BİREYSEL profesyonel pratik: bağımsız/serbest kariyer koçu, psikolojik danışman/psikolog, terapist. Aracı bizzat kendisi kullanır; şirket/kurum DEĞİL (unvan+kişi adı ağırlıkta, 'A.Ş.'/'Ltd.'/kurumsal 'biz' anlatısı YOK).\n" +
-      "- b2b2c_ld = kurumsal İK / yetenek / L&D / danışmanlık ŞİRKETİ ya da çok-çalışanlı tüzel kişilik (Reflektif'i müşterilerine/çalışanlarına sunacak aracı kurum).\n" +
+      "- b2b_pro = SADECE tek bir gerçek kişinin kendi adıyla yürüttüğü BİREYSEL profesyonel pratik: bağımsız/serbest kariyer koçu, psikolojik danışman/psikolog, terapist. Aracı bizzat kişinin kendisi kullanır. Unvan+kişi adı ağırlıkta; şirket/A.Ş./Ltd./çok-çalışanlı kurumsal 'biz' anlatısı YOK. Çok-çalışanlı bir şirket/kurum/tüzel kişilik ASLA b2b_pro DEĞİLDİR.\n" +
+      "- b2b2c_ld = çok-çalışanlı HERHANGİ bir ŞİRKET / kurum / tüzel kişilik. Yalnız İK/yetenek/L&D/danışmanlık şirketleri değil; ÜRETİCİ, teknoloji/yazılım firması, sanayi/oda üyesi, holding, fabrika vb. dahil GENEL kurumsal kategori — Reflektif'i çalışanlarına ve/veya müşterilerine sunabilecek her tüzel kişilik. Şüphede kal(ıp bir kurumu b2b_pro'ya koyma): çok-çalışanlı görünen her yapı buraya girer.\n" +
       "- b2b_edu = üniversite/okul/eğitim kurumu (kariyer merkezi vb.).\n" +
       "- b2c = yukarıdakilerin hiçbiri (son-kullanıcı/genel).\n" +
-      "AYIRT EDİCİ ÖRNEKLER: 'Uzm. Psikolog Ayşe X - bireysel terapi' → b2b_pro; 'X Kurumsal İK Danışmanlığı A.Ş.' → b2b2c_ld.\n" +
+      "AYIRT EDİCİ ÖRNEKLER: 'Uzm. Psikolog Ayşe Y - bireysel terapi' → b2b_pro (birey, tek kişi); 'X Kurumsal İK Danışmanlığı A.Ş.' → b2b2c_ld; 'X Elektronik Sanayi A.Ş.' → b2b2c_ld (tacir, çok-çalışanlı şirket — b2b_pro DEĞİL).\n" +
       "entity_type ∈ {tacir, kamu, birey, bilinmiyor}. icp_score 0-100 SAYI (Reflektif'e uygunluk). why_now = neden şimdi iyi hedef (TR, kısa)." +
       prior,
     user: `KURUM: ${orgName}\nURL: ${url}\n--- İÇERİK ---\n${text.slice(0, 6000)}`,
   });
   const icp = Math.max(0, Math.min(100, Math.round(cls.icp_score)));
-  const segment = normSegment(cls.segment);
+  // ENTITY-GUARD: b2b_pro yalnız gerçek birey ise geçerli; tacir/kamu/bilinmiyor b2b_pro → b2b2c_ld'ye düşer.
+  const segment = resolveSegment(cls.segment, cls.entity_type);
   const entityType = normEntity(cls.entity_type);
   await query(`update lead_companies set name=$2, segment=$3, entity_type=$4, icp_score=$5, signals=$6, evidence_url=$7 where id=$1`, [
     companyId,

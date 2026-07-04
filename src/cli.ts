@@ -4,7 +4,7 @@ import { runWorkerTurn } from "./core/worker";
 import { enqueue, reapExpired } from "./core/queue";
 import { pause, resume } from "./core/switches";
 import { query, pool, withClient } from "./db/pool";
-import { extractOrgLinks, discoverContactPaths, normSegment } from "./loops/leadgen";
+import { extractOrgLinks, discoverContactPaths, normSegment, resolveSegment } from "./loops/leadgen";
 import { mapResult, type EmailStatus } from "./verify/emailVerify";
 import { runJsonWithRepair } from "./llm/repair";
 import { audit } from "./core/audit";
@@ -141,6 +141,25 @@ async function smoke(): Promise<void> {
     const got = normSegment(input);
     if (got !== expected) {
       throw new Error(`SMOKE FAILED: normSegment(${JSON.stringify(input)}) → ${got}, beklenen ${expected}`);
+    }
+  }
+
+  // leadgen resolveSegment — ENTITY-GUARD (deterministik, ağsız). b2b_pro YALNIZ entity='birey' ise geçerli;
+  // tacir/kamu/bilinmiyor b2b_pro → b2b2c_ld'ye düşer (sanayi/teknopark firması yanlış b2b_pro sızıntısı).
+  // edu korunur (entity ne olursa olsun); b2c dokunulmaz.
+  const resolveChecks: Array<[string, string, string]> = [
+    ["b2b_pro", "tacir", "b2b2c_ld"], // şirket b2b_pro OLAMAZ → düşer
+    ["b2b_pro", "birey", "b2b_pro"], // gerçek bireysel profesyonel → korunur
+    ["b2b_pro", "kamu", "b2b2c_ld"], // kamu b2b_pro OLAMAZ → düşer
+    ["b2b_pro", "bilinmiyor", "b2b2c_ld"], // bilinmiyor da birey DEĞİL → düşer
+    ["b2b2c_ld", "tacir", "b2b2c_ld"], // zaten kurumsal → değişmez
+    ["b2b_edu", "kamu", "b2b_edu"], // edu korunur (guard yalnız b2b_pro'ya dokunur)
+    ["b2c", "birey", "b2c"], // b2c dokunulmaz
+  ];
+  for (const [rawSeg, rawEnt, expected] of resolveChecks) {
+    const got = resolveSegment(rawSeg, rawEnt);
+    if (got !== expected) {
+      throw new Error(`SMOKE FAILED: resolveSegment(${JSON.stringify(rawSeg)}, ${JSON.stringify(rawEnt)}) → ${got}, beklenen ${expected}`);
     }
   }
 
@@ -477,6 +496,52 @@ async function draftsReview(args: string[]): Promise<void> {
   }
 }
 
+// reenrich <id...> — hedefli yeniden sınıflama. Bayat 'done' enrich job'ını siler, taze enqueue eder,
+// SADECE leadgen:enrich turlarını sürer (tam kaynak taraması YOK, compintel'e dokunmaz). Entity-guard
+// atlayan (LLM'in entity_type'ı yanlış verdiği) kayıtları yeni prompt'la düzeltmenin tek yolu re-enrich'tir.
+async function reenrichCompanies(args: string[]): Promise<void> {
+  const ids = args.map((a) => Number(a)).filter((n) => Number.isInteger(n) && n > 0);
+  if (!ids.length) {
+    console.log("kullanım: reenrich <companyId> [companyId...]  (hedefli yeniden sınıflama; kaynak taraması YOK)");
+    return;
+  }
+  const before = await query<{ id: number; name: string; domain: string | null; segment: string | null; entity_type: string | null }>(
+    `select id, name, domain, segment, entity_type from lead_companies where id = any($1::int[]) order by id`,
+    [ids],
+  );
+  if (!before.rows.length) {
+    console.log("reenrich: eşleşen lead_companies kaydı yok:", ids);
+    return;
+  }
+  for (const row of before.rows) {
+    if (!row.domain) {
+      log.warn({ id: row.id }, "reenrich: domain yok, atlandı");
+      continue;
+    }
+    // Bayat 'done' job'ı sil → dedupe_key çakışmasını kaldır, sonra taze enqueue et.
+    await query(`delete from agent_jobs where dedupe_key=$1`, [`enrich:${row.domain}`]);
+    const jid = await enqueue({ loop: "leadgen", kind: "leadgen:enrich", payload: { companyId: row.id }, dedupeKey: `enrich:${row.domain}` });
+    log.info({ id: row.id, domain: row.domain, jobId: jid }, "reenrich: enrich yeniden kuyruğa");
+  }
+  let ran = 0;
+  for (let i = 0; i < ids.length * 3 + 5; i++) {
+    const r = await runWorkerTurn("leadgen", ["leadgen:enrich"]);
+    if (r === "idle") break;
+    if (r === "ran") ran++;
+  }
+  const after = await query<{ id: number; segment: string | null; entity_type: string | null }>(
+    `select id, segment, entity_type from lead_companies where id = any($1::int[]) order by id`,
+    [ids],
+  );
+  const afterMap = new Map(after.rows.map((r) => [r.id, r]));
+  console.log(`\nreenrich bitti (ran=${ran}):`);
+  for (const b of before.rows) {
+    const a = afterMap.get(b.id);
+    const changed = a && (a.segment !== b.segment || a.entity_type !== b.entity_type);
+    console.log(`  #${b.id} ${b.name}: ${b.segment}/${b.entity_type} → ${a?.segment}/${a?.entity_type}${changed ? "  ✓ değişti" : ""}`);
+  }
+}
+
 async function main(): Promise<void> {
   const [cmd, ...args] = process.argv.slice(2);
   switch (cmd) {
@@ -574,9 +639,12 @@ async function main(): Promise<void> {
     case "drafts":
       await draftsReview(args);
       break;
+    case "reenrich":
+      await reenrichCompanies(args);
+      break;
     default:
       console.log(
-        "komutlar: migrate | tick | worker | reaper | status | smoke | drafts [--limit N] [--segment X] [--full] | add-lead <domain> [ad] | add-source <url> [filter] [ad] | list-sources | notion-sync [--dry-run] [--limit N] | pause <loop> <reason> | resume <loop>",
+        "komutlar: migrate | tick | worker | reaper | status | smoke | drafts [--limit N] [--segment X] [--full] | reenrich <companyId...> | add-lead <domain> [ad] | add-source <url> [filter] [ad] | list-sources | notion-sync [--dry-run] [--limit N] | pause <loop> <reason> | resume <loop>",
       );
   }
 }
